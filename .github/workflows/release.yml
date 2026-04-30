@@ -1,0 +1,207 @@
+name: release
+
+# Triggered by pushing a tag like `v0.4.0`. Builds release binaries for the
+# canonical platforms, ships man pages + shell completions in each archive,
+# computes SHA-256 checksums, signs the archives with cosign keyless (Sigstore
+# OIDC, no secrets needed), and uploads everything to a GitHub Release.
+#
+# This is a hand-rolled equivalent of `cargo dist`; we keep the workflow
+# self-contained so it works without `cargo dist init` having to write to the
+# repo. To migrate to cargo-dist later: install it, run `cargo dist init`, and
+# replace this file with the generated workflow.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write   # required for cosign keyless (Sigstore Fulcio)
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  BIN: cnb
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Stage 1: render man pages + shell completions on a single Linux runner.
+  # These artifacts are platform-independent so we only build them once and
+  # then ship the same files inside every per-target archive below.
+  # -------------------------------------------------------------------------
+  assets:
+    name: render man + completions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.86"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: assets
+
+      - name: Render dist/
+        run: cargo run -p xtask --release -- gen-dist
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-shared
+          path: dist/
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # Stage 2: per-target binary build. Pulls the shared dist/ down so each
+  # archive contains the binary plus man/* and completions/*.
+  # -------------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+            cross: "1"
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.86"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.cross == '1'
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build
+        shell: bash
+        run: |
+          if [[ "${{ matrix.cross }}" == "1" ]]; then
+            cross build --release --target ${{ matrix.target }} -p cnb
+          else
+            cargo build --release --target ${{ matrix.target }} -p cnb
+          fi
+
+      - name: Download shared dist artifacts (man + completions)
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-shared
+          path: dist-shared/
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${BIN}-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/${BIN}${{ matrix.ext }}" "dist/${NAME}/"
+          cp README.md DESIGN.md LICENSE* "dist/${NAME}/" 2>/dev/null || true
+          # ship man pages + shell completions
+          mkdir -p "dist/${NAME}/man" "dist/${NAME}/completions"
+          cp -R dist-shared/man/.        "dist/${NAME}/man/"        2>/dev/null || true
+          cp -R dist-shared/completions/. "dist/${NAME}/completions/" 2>/dev/null || true
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "${NAME}.zip" "${NAME}/"
+            sha256sum "${NAME}.zip" > "${NAME}.zip.sha256" || shasum -a 256 "${NAME}.zip" > "${NAME}.zip.sha256"
+          else
+            tar czf "${NAME}.tar.gz" "${NAME}"
+            shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ env.BIN }}-*
+
+  # -------------------------------------------------------------------------
+  # Stage 3: collect all per-target archives, cosign-sign them (keyless), and
+  # publish a GitHub Release.
+  # -------------------------------------------------------------------------
+  publish:
+    name: publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          # Skip the dist-shared bundle; we only need the per-target archives.
+          find dist -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+            ! -path 'dist/dist-shared/*' \
+            -exec cp -v {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign keyless sign archives
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cd release-assets
+          # Sign every archive (.tar.gz / .zip), producing .sig + .pem sidecars.
+          # Verifiers run:
+          #   cosign verify-blob --certificate cnb-vX.Y.Z-...tar.gz.pem \
+          #     --signature cnb-vX.Y.Z-...tar.gz.sig \
+          #     --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+          #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          #     cnb-vX.Y.Z-...tar.gz
+          for f in *.tar.gz *.zip; do
+            [ -e "$f" ] || continue
+            echo "→ signing $f"
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
+          ls -la
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,29 @@
+{
+  "//comment": "Scoop bucket manifest template for cnb CLI. The actual manifest lives in an external bucket repo (e.g. cnb-cool/scoop-bucket); substitute %VERSION% and %SHA256_WIN_AMD64% before committing.",
+  "version": "%VERSION%",
+  "description": "Official command-line tool for CNB (CloudNative Build, cnb.cool)",
+  "homepage": "https://cnb.cool",
+  "license": "MIT OR Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/cnb-cool/cnb/releases/download/v%VERSION%/cnb-v%VERSION%-x86_64-pc-windows-msvc.zip",
+      "hash": "%SHA256_WIN_AMD64%",
+      "extract_dir": "cnb-v%VERSION%-x86_64-pc-windows-msvc"
+    }
+  },
+  "bin": "cnb.exe",
+  "checkver": {
+    "github": "https://github.com/cnb-cool/cnb"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/cnb-cool/cnb/releases/download/v$version/cnb-v$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "cnb-v$version-x86_64-pc-windows-msvc",
+        "hash": {
+          "url": "$url.sha256"
+        }
+      }
+    }
+  }
+}

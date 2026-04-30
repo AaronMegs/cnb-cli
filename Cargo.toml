@@ -1,0 +1,118 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cnb",
+    "crates/cnb-cli",
+    "crates/cnb-api",
+    "crates/cnb-config",
+    "crates/cnb-auth",
+    "crates/cnb-git",
+    "crates/cnb-tty",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.4.0-alpha.1"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+authors = ["CNB CLI Authors <cnb@tencent.com>"]
+homepage = "https://cnb.cool"
+repository = "https://cnb.cool/cnb/cli"
+description = "Official command-line tool for CNB (CloudNative Build, cnb.cool)"
+
+[workspace.dependencies]
+# --- internal crates ---
+cnb-cli = { path = "crates/cnb-cli", version = "0.4.0-alpha.1" }
+cnb-api = { path = "crates/cnb-api", version = "0.4.0-alpha.1" }
+cnb-config = { path = "crates/cnb-config", version = "0.4.0-alpha.1" }
+cnb-auth = { path = "crates/cnb-auth", version = "0.4.0-alpha.1" }
+cnb-git = { path = "crates/cnb-git", version = "0.4.0-alpha.1" }
+cnb-tty = { path = "crates/cnb-tty", version = "0.4.0-alpha.1" }
+
+# --- runtime ---
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs", "process", "signal", "io-util", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "multipart"] }
+url = "2"
+
+# --- ser/de ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+toml = "0.8"
+
+# --- cli & ux ---
+clap = { version = "4", features = ["derive", "env", "wrap_help", "unicode"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+comfy-table = "=7.1.4"
+owo-colors = "4"
+indicatif = "0.17"
+is-terminal = "0.4"
+dialoguer = "0.11"
+open = "5"
+jaq-interpret = "1"
+jaq-parse = "1"
+jaq-core = "1"
+jaq-std = "1"
+tinytemplate = "1"
+termimad = "0.30"
+
+# --- M2: file uploads ---
+mime_guess = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# --- config / credentials / paths ---
+# keyring 2.x: default features = ["linux-native", "apple-native", "windows-native"], all good cross-platform.
+keyring = "2"
+directories = "5"
+fs2 = "0.4"
+tempfile = "3"
+
+# --- error / log ---
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# --- platform ---
+once_cell = "1"
+
+# --- test ---
+wiremock = "=0.6.2"
+assert_cmd = "2"
+predicates = "3"
+insta = { version = "1", features = ["yaml", "json"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# pragmatic relaxations
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+multiple_crate_versions = "allow"
+struct_excessive_bools = "allow"
+redundant_closure_for_method_calls = "allow"
+assigning_clones = "allow"
+needless_pass_by_value = "allow"
+return_self_not_must_use = "allow"
+single_match_else = "allow"
+uninlined_format_args = "allow"
+doc_markdown = "allow"
+missing_fields_in_debug = "allow"
+cast_possible_truncation = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3

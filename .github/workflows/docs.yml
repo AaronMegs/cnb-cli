@@ -1,0 +1,45 @@
+name: docs
+
+# Build the mdbook handbook on every push/PR. We upload the rendered HTML as
+# a workflow artifact so reviewers can preview without a deploy target. Once
+# cnb pages (or GitHub Pages) is wired up, add a `deploy` job here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build mdbook
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+
+      - name: Build
+        run: |
+          cd docs
+          mdbook build
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnb-handbook
+          path: target/book/
+          if-no-files-found: error
