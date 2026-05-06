@@ -33,5 +33,6 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         Commands::Config(args) => commands::config::run(&mut ctx, args).await,
         Commands::Alias(args) => commands::alias::run(&mut ctx, args).await,
         Commands::Update(args) => commands::update::run(&mut ctx, args).await,
+        Commands::Search(args) => commands::search::run(&mut ctx, args).await,
     }
 }

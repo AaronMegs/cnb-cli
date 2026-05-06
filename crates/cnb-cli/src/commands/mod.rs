@@ -17,5 +17,6 @@ pub mod pr;
 pub mod registry;
 pub mod release;
 pub mod repo;
+pub mod search;
 pub mod update;
 pub mod workspace;

@@ -30,6 +30,12 @@ cnb-auth = { path = "crates/cnb-auth", version = "0.4.0-alpha.1" }
 cnb-git = { path = "crates/cnb-git", version = "0.4.0-alpha.1" }
 cnb-tty = { path = "crates/cnb-tty", version = "0.4.0-alpha.1" }
 
+# --- external: typed CNB SDK (used progressively, starting with `cnb search`) ---
+# Covers all 241 OpenAPI ops; we disable default features to stay in lock-step
+# with the project's reqwest TLS choice (rustls) and to let us slim later.
+# Published by the same maintainer; caret will auto-track 0.2.x patches.
+cnb-sdk = { package = "cnb", version = "0.2", default-features = false, features = ["rustls-tls", "retry", "all-resources"] }
+
 # --- runtime ---
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs", "process", "signal", "io-util", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip", "multipart"] }

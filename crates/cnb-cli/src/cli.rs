@@ -5,7 +5,8 @@ use clap::{Parser, Subcommand};
 use crate::commands::{
     alias::AliasArgs, api::ApiArgs, auth::AuthArgs, browse::BrowseArgs, build::BuildArgs, completion::CompletionArgs,
     config::ConfigArgs, issue::IssueArgs, label::LabelArgs, mission::MissionArgs, org::OrgArgs, pr::PrArgs,
-    registry::RegistryArgs, release::ReleaseArgs, repo::RepoArgs, update::UpdateArgs, workspace::WorkspaceArgs,
+    registry::RegistryArgs, release::ReleaseArgs, repo::RepoArgs, search::SearchArgs, update::UpdateArgs,
+    workspace::WorkspaceArgs,
 };
 
 /// `cnb` — official command-line tool for CNB (cnb.cool).
@@ -62,4 +63,6 @@ pub enum Commands {
     Alias(AliasArgs),
     /// Check for newer cnb releases on GitHub (M5.0).
     Update(UpdateArgs),
+    /// Search public repositories (first consumer of the typed SDK).
+    Search(SearchArgs),
 }

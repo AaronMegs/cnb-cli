@@ -22,6 +22,16 @@ pub struct Context {
     pub hosts_path: PathBuf,
     keyring: Box<dyn KeyringBackend>,
     api: Option<Client>,
+    /// Typed SDK client (external crate `cnb`, aliased as `cnb-sdk`).
+    /// Introduced in Phase 1 of the cnb-api → cnb SDK migration and shared
+    /// with new commands (starting with `cnb search`) while legacy facades
+    /// continue to use `api` above. Once every command has migrated,
+    /// `api` and the local `cnb-api` crate can be removed.
+    sdk: Option<cnb_sdk::ApiClient>,
+    /// Base URL override for the SDK client — set by tests (wiremock) via
+    /// [`Context::set_sdk_base_url`]. Production code leaves this `None` and
+    /// the SDK uses its built-in `https://api.cnb.cool` default.
+    sdk_base_url: Option<String>,
 }
 
 impl std::fmt::Debug for Context {
@@ -49,6 +59,8 @@ impl Context {
             hosts_path,
             keyring,
             api: None,
+            sdk: None,
+            sdk_base_url: None,
         })
     }
 
@@ -75,6 +87,52 @@ impl Context {
     /// where the token isn't yet stored).
     pub fn api_with_token(&self, token: &str) -> Result<Client, CliError> {
         Ok(Client::builder().token(token).build()?)
+    }
+
+    /// Build (or reuse) the typed SDK client (`cnb` crate / `cnb-sdk`).
+    ///
+    /// Phase 1 of the cnb-api → SDK migration. Token resolution keeps the
+    /// project's three-tier contract (env > keyring > file) by running
+    /// `cnb_auth::resolve_token` here and **only** feeding the resolved
+    /// string into `ClientBuilder::token()` — we never rely on the SDK's own
+    /// `CNB_TOKEN` env-var fallback so behaviour stays identical on
+    /// CI / remote-container machines where the env var is unset.
+    ///
+    /// The base URL honours the same `CNB_API_BASE` test override that
+    /// `cnb-api::Client` already supports, keeping all existing wiremock
+    /// fixtures usable for SDK-backed commands too.
+    pub fn sdk(&mut self) -> Result<&cnb_sdk::ApiClient, CliError> {
+        if self.sdk.is_none() {
+            let (token, _src) = resolve_token(&self.host, None, self.keyring.as_ref(), Some(&self.hosts_path))?;
+            let mut builder = cnb_sdk::ApiClient::builder()
+                .token(token)
+                .user_agent(concat!("cnb/", env!("CARGO_PKG_VERSION")));
+            // Effective base URL precedence: explicit override (set via
+            // `set_sdk_base_url`, used by unit tests) > `CNB_API_BASE` env
+            // (used by integration tests / wiremock) > SDK default
+            // (`https://api.cnb.cool`).
+            let base_override = self
+                .sdk_base_url
+                .clone()
+                .or_else(|| std::env::var("CNB_API_BASE").ok().filter(|v| !v.is_empty()));
+            if let Some(base) = base_override {
+                builder = builder.base_url(base);
+            }
+            let client = builder.build().map_err(CliError::from)?;
+            self.sdk = Some(client);
+        }
+        Ok(self.sdk.as_ref().expect("just inserted"))
+    }
+
+    /// Test-only hook: override the SDK base URL (e.g. a wiremock server).
+    /// Must be called before the first [`Context::sdk`] invocation.
+    #[doc(hidden)]
+    pub fn set_sdk_base_url(&mut self, url: impl Into<String>) {
+        self.sdk_base_url = Some(url.into());
+        // Drop any previously-built client so the override takes effect on
+        // the next `sdk()` call. Cheap: `ApiClient` is just `Arc`s under the
+        // hood, so there's no real teardown cost.
+        self.sdk = None;
     }
 
     /// Resolve the repository slug to operate on (M2 §8.2 contract).

@@ -522,6 +522,20 @@ dependencies = [
 
 [[package]]
 name = "cnb"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5651b7977a9173b14da897a0e9554de8c5cd20fbdc95d604b995b33a4a6b70d8"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "cnb"
 version = "0.4.0-alpha.1"
 dependencies = [
  "assert_cmd",
@@ -572,6 +586,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "cnb 0.2.1",
  "cnb-api",
  "cnb-auth",
  "cnb-config",
@@ -858,6 +873,15 @@ name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
 
 [[package]]
 name = "enumflags2"
@@ -2359,9 +2383,11 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "encoding_rs",
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -2370,6 +2396,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "mime_guess",
  "percent-encoding",
  "pin-project-lite",

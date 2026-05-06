@@ -11,6 +11,13 @@ pub enum CliError {
     #[error(transparent)]
     Api(#[from] ApiError),
 
+    /// Errors surfaced by the external typed SDK (`cnb` crate / `cnb-sdk`).
+    /// Kept as a distinct variant from [`Api`] during the migration so we
+    /// can map its richer envelope (`code` / `message` / `request_id`) to
+    /// the same exit codes without losing fidelity.
+    #[error(transparent)]
+    Sdk(#[from] cnb_sdk::ApiError),
+
     #[error(transparent)]
     Auth(#[from] AuthError),
 
@@ -56,6 +63,16 @@ impl CliError {
             // a reasonable retry strategy is "wait and try again".
             Self::Api(ApiError::RateLimited { .. }) | Self::Cancelled => 8,
             Self::Api(ApiError::Api { http_status, .. }) if (500..600).contains(&u32::from(*http_status)) => 9,
+            // SDK error — mirror the `Api` arms by inspecting its HTTP status.
+            // `ApiError::status()` returns `Option<u16>`; non-HTTP variants
+            // (transport, URL parse, JSON) fall through to the generic `1`.
+            Self::Sdk(e) => match e.status() {
+                Some(401) => 4,
+                Some(404) => 2,
+                Some(429) => 8,
+                Some(s) if (500..600).contains(&s) => 9,
+                _ => 1,
+            },
             Self::BadArgs(_) | Self::NotImplemented(_) => 3,
             Self::Interrupted => 5,
             Self::Config(_) => 10,

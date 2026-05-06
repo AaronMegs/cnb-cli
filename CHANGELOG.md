@@ -7,6 +7,30 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 1)
+
+- Depend on external crate `cnb = "0.2"` (aliased as `cnb-sdk` in workspace
+  manifests to avoid collision with the local `cnb` binary). Covers all
+  241 CNB OpenAPI operations across 28 tag groups, published by the same
+  maintainer and generated from the same swagger spec.
+- New top-level command `cnb search` backed by `cnb_sdk::search` — the
+  first consumer of the typed SDK in this repo. Single endpoint
+  (`GET /search/public-repos`), pure read, read-only DTO round trip; chosen
+  as a low-risk pilot for the wider migration (Phase 2 will port the rest
+  of `crates/cnb-api/src/services/*.rs` module by module).
+- `Context::sdk()` on the CLI runtime context: three-tier token resolver
+  (`env > keyring > file`, identical to `Context::api()`) feeding
+  `cnb_sdk::ApiClient::builder().token(...)`. Honours `CNB_API_BASE` for
+  wiremock test parity with every existing integration fixture.
+- `Context::set_sdk_base_url()`: test-only hook for unit tests that need to
+  build the client against an arbitrary URL without going through the env.
+- `CliError::Sdk(cnb_sdk::ApiError)` variant with HTTP-status → exit-code
+  mapping (401 → 4, 404 → 2, 429 → 8, 5xx → 9) mirroring the existing
+  `Api` arms.
+- 5 wiremock integration tests (`crates/cnb/tests/search_sdk.rs`) covering
+  table output, query-parameter forwarding, `--json`, `--jq`, and the
+  401→exit 4 error path.
+
 ### Added (M5.1 distribution prep)
 
 - `cargo xtask gen-man` — render man pages (one per leaf command, 128 files

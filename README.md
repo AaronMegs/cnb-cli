@@ -154,6 +154,8 @@ cnb api /user --template '{username}: {email}'
 | **M4**    | ✅ done    | `cnb registry` / `cnb mission` / `cnb org` + `cnb repo collaborator/pin/contributors` + `cnb browse` / `cnb completion` / `cnb config` / `cnb alias` + `cnb auth setup-git` (35+ new subcommands) |
 | **M5.0**  | ✅ done    | `cnb update`, `release.yml`, `scripts/install.sh`, CI hardening                |
 | **M5.1**  | ✅ done    | man pages + 5-shell completions baked into release archives, cosign keyless signing, mdbook handbook scaffold, Homebrew/Scoop manifest templates |
+| **SDK-1** | ✅ done    | Phase 1 of the cnb-api → typed SDK migration: depends on external crate `cnb = "0.2"`, pilots it via new `cnb search` (first consumer), keeps `cnb-api` facades in place for all other commands |
+| **SDK-2** | planned    | Phase 2: port `cnb repo/issue/label/pr/build/release/...` facades to the SDK module by module; retire `crates/cnb-api` once empty |
 | **M5.2**  | partial    | apt / yum repos, Docker image — needs external infra (out of band) |
 | **M6**    | partial    | sigstore signing ✅; mdbook deploy + external case study — out of band |
 
