@@ -135,6 +135,43 @@ impl Context {
         self.sdk = None;
     }
 
+    /// Resolve the base URL that the SDK client will actually use. Mirrors
+    /// the precedence used inside [`Context::sdk`]: explicit override
+    /// (tests) > `CNB_API_BASE` env (wiremock fixtures) > SDK default.
+    fn effective_sdk_base_url(&self) -> String {
+        self.sdk_base_url
+            .clone()
+            .or_else(|| std::env::var("CNB_API_BASE").ok().filter(|v| !v.is_empty()))
+            .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned())
+    }
+
+    /// Low-level GET returning `serde_json::Value`, routed through the SDK's
+    /// HTTP layer (shares its reqwest pool, retry config, auth header, and
+    /// tracing instrumentation).
+    ///
+    /// Useful for commands whose endpoint **is** modelled by the SDK but
+    /// whose rendering logic still needs fields the typed DTO does not
+    /// expose (e.g. `default_branch` on a single-repo view). Prefer the
+    /// typed `client.<resource>().<op>()` call wherever the DTO is
+    /// sufficient.
+    pub async fn sdk_raw_get(&mut self, path: &str) -> Result<serde_json::Value, CliError> {
+        let base = self.effective_sdk_base_url();
+        // `url::Url::join` treats an absolute path correctly but requires
+        // the base to end with `/`. We normalise defensively.
+        let mut base_with_slash = base;
+        if !base_with_slash.ends_with('/') {
+            base_with_slash.push('/');
+        }
+        let base_url = url::Url::parse(&base_with_slash)
+            .map_err(|e| CliError::Generic(format!("invalid SDK base url `{base_with_slash}`: {e}")))?;
+        let full = base_url
+            .join(path.trim_start_matches('/'))
+            .map_err(|e| CliError::Generic(format!("could not join path `{path}` onto base: {e}")))?;
+        let client = self.sdk()?;
+        let v: serde_json::Value = client.http().execute(reqwest::Method::GET, full).await?;
+        Ok(v)
+    }
+
     /// Resolve the repository slug to operate on (M2 §8.2 contract).
     ///
     /// Resolution order:

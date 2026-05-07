@@ -1,10 +1,15 @@
 //! `cnb repo` — repository commands (M2 §8.2, 11 subcommands).
+//!
+//! `view` and `list` are backed by the typed SDK (`cnb-sdk`) as of Phase 2
+//! of the migration; the remaining subcommands still route through the
+//! hand-written `cnb-api` facade and will be ported module-by-module.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{Args, Subcommand};
 use cnb_api::services::repos;
+use cnb_sdk::repositories::{GetReposByUserNameQuery, GetReposQuery};
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -268,45 +273,93 @@ fn visibility_to_level(s: &str) -> i64 {
     }
 }
 
-fn level_to_visibility(level: Option<i64>) -> &'static str {
-    match level {
-        Some(0) => "public",
-        Some(10) => "internal",
-        Some(20) => "private",
+/// Render the `visibility_level` field of a repo DTO as a human string.
+///
+/// The upstream spec types `visibility_level` as a **string alias** (see
+/// `cnb_sdk::models::Visibility`), so the SDK-typed code paths already get
+/// `"public"` / `"internal"` / `"private"` verbatim. This helper is kept as
+/// a defensive formatter that also tolerates the legacy integer encoding
+/// (`0` / `10` / `20`) some older servers still emit — we transparently
+/// coerce integers to the canonical string form.
+fn format_visibility(raw: Option<&Value>) -> &'static str {
+    match raw {
+        Some(Value::String(s)) => match s.as_str() {
+            "public" => "public",
+            "internal" => "internal",
+            "private" => "private",
+            _ => "?",
+        },
+        Some(Value::Number(n)) => match n.as_i64() {
+            Some(0) => "public",
+            Some(10) => "internal",
+            Some(20) => "private",
+            _ => "?",
+        },
         _ => "?",
     }
 }
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    let query = format!("page={}&per_page={}", args.page, args.limit.max(1));
-    let client = ctx.api()?;
-    let items: Vec<Value> = match args.target.as_deref() {
-        None => repos::list_self(client, &query).await?,
-        Some(t) if t.contains('/') => repos::list_under_slug(client, t, &query).await?,
-        Some(user) => repos::list_user(client, user, &query).await?,
+    let client = ctx.sdk()?;
+    let page = i64::from(args.page);
+    let page_size = i64::from(args.limit.max(1));
+    // Dispatch to the right SDK operation based on what the user supplied:
+    //   - no target          → `GET /user/repos`        (get_repos)
+    //   - target with a `/`  → `GET /{slug}/-/repos`    (get_group_sub_repos)
+    //   - bare username      → `GET /users/{u}/repos`   (get_repos_by_user_name)
+    let items = match args.target.as_deref() {
+        None => {
+            let q = GetReposQuery::new().page(page).page_size(page_size);
+            client.repositories().get_repos(&q).await?
+        }
+        Some(t) if t.contains('/') => {
+            let q = cnb_sdk::repositories::GetGroupSubReposQuery::new()
+                .page(page)
+                .page_size(page_size);
+            client.repositories().get_group_sub_repos(t.to_owned(), &q).await?
+        }
+        Some(user) => {
+            let q = GetReposByUserNameQuery::new().page(page).page_size(page_size);
+            client
+                .repositories()
+                .get_repos_by_user_name(user.to_owned(), &q)
+                .await?
+        }
     };
-    let v = Value::Array(items.clone());
+    // Serialise once so we can drive both the --json/--jq/--template path
+    // and the default table off the same Value. `Repos4User` derives
+    // Serialize, so the round-trip is infallible.
+    let v = serde_json::to_value(&items).expect("Repos4User serialises infallibly");
     if args.out.render_value(ctx, &v)? {
         return Ok(());
     }
     // Default table.
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(items.len());
-    for it in &items {
-        let path = it.get("path").and_then(Value::as_str).unwrap_or("");
-        let name = it.get("name").and_then(Value::as_str).unwrap_or(path);
-        let desc = it.get("description").and_then(Value::as_str).unwrap_or("");
-        let vis = level_to_visibility(it.get("visibility_level").and_then(Value::as_i64));
-        let upd = it.get("last_activity_at").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![
-            if path.is_empty() {
-                name.to_owned()
-            } else {
-                path.to_owned()
-            },
-            desc.to_owned(),
-            vis.to_owned(),
-            upd.to_owned(),
-        ]);
+    if let Some(arr) = v.as_array() {
+        for it in arr {
+            let path = it.get("path").and_then(Value::as_str).unwrap_or("");
+            let name = it.get("name").and_then(Value::as_str).unwrap_or(path);
+            let desc = it.get("description").and_then(Value::as_str).unwrap_or("");
+            let vis = format_visibility(it.get("visibility_level"));
+            // Prefer the canonical `updated_at` field that the SDK DTO pins
+            // down; fall back to the older `last_activity_at` key that some
+            // legacy responses use so cached mocks keep working.
+            let upd = it
+                .get("updated_at")
+                .or_else(|| it.get("last_activity_at"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            rows.push(vec![
+                if path.is_empty() {
+                    name.to_owned()
+                } else {
+                    path.to_owned()
+                },
+                desc.to_owned(),
+                vis.to_owned(),
+                upd.to_owned(),
+            ]);
+        }
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(
@@ -320,17 +373,34 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
 
 async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = repos::view(client, &repo).await?;
+    // We hit the SDK twice on purpose:
+    //   1. Typed call (`get_by_id`) — catches schema regressions early and
+    //      proves the SDK is wired up. Result is discarded.
+    //   2. Raw `Value` call via `ctx.sdk_raw_get(...)` — preserves every
+    //      field the server sends (e.g. `default_branch`, which is NOT
+    //      part of the `Repos4User` DTO yet), so --json / --jq / --template
+    //      stay faithful to the wire payload.
+    // Both calls share the same reqwest client + connection pool, so the
+    // second request reuses the existing TCP/TLS session; the added cost
+    // is one extra round-trip to the same host, acceptable for single-
+    // object views.
+    let _dto = {
+        let client = ctx.sdk()?;
+        client.repositories().get_by_id(repo.clone()).await?
+    };
+    let v = ctx.sdk_raw_get(&format!("/{repo}")).await?;
     if args.out.render_value(ctx, &v)? {
         return Ok(());
     }
-    // Card-style output.
     let path = v.get("path").and_then(Value::as_str).unwrap_or(&repo);
     let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
-    let vis = level_to_visibility(v.get("visibility_level").and_then(Value::as_i64));
+    let vis = format_visibility(v.get("visibility_level"));
     let branch = v.get("default_branch").and_then(Value::as_str).unwrap_or("");
-    let upd = v.get("last_activity_at").and_then(Value::as_str).unwrap_or("");
+    let upd = v
+        .get("updated_at")
+        .or_else(|| v.get("last_activity_at"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     println!("{path}");
     println!("  Visibility:    {vis}");
     if !branch.is_empty() {
@@ -542,16 +612,36 @@ async fn contributors(ctx: &mut Context, args: ContributorsArgs) -> Result<(), C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn visibility_round_trip() {
+    fn visibility_to_level_maps_canonical_names() {
         assert_eq!(visibility_to_level("public"), 0);
         assert_eq!(visibility_to_level("internal"), 10);
         assert_eq!(visibility_to_level("private"), 20);
+        // Anything unexpected defaults to the most conservative level.
         assert_eq!(visibility_to_level("garbage"), 20);
-        assert_eq!(level_to_visibility(Some(0)), "public");
-        assert_eq!(level_to_visibility(Some(10)), "internal");
-        assert_eq!(level_to_visibility(Some(20)), "private");
-        assert_eq!(level_to_visibility(None), "?");
+    }
+
+    #[test]
+    fn format_visibility_accepts_strings() {
+        assert_eq!(format_visibility(Some(&json!("public"))), "public");
+        assert_eq!(format_visibility(Some(&json!("internal"))), "internal");
+        assert_eq!(format_visibility(Some(&json!("private"))), "private");
+        assert_eq!(format_visibility(Some(&json!("weird"))), "?");
+    }
+
+    #[test]
+    fn format_visibility_tolerates_legacy_integer_encoding() {
+        assert_eq!(format_visibility(Some(&json!(0))), "public");
+        assert_eq!(format_visibility(Some(&json!(10))), "internal");
+        assert_eq!(format_visibility(Some(&json!(20))), "private");
+        assert_eq!(format_visibility(Some(&json!(99))), "?");
+    }
+
+    #[test]
+    fn format_visibility_handles_missing_and_null() {
+        assert_eq!(format_visibility(None), "?");
+        assert_eq!(format_visibility(Some(&json!(null))), "?");
     }
 }

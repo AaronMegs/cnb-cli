@@ -1,4 +1,9 @@
 //! M2: end-to-end coverage for `cnb repo …` against a wiremock backend.
+//!
+//! `view` / `list` are SDK-backed as of Phase 2; their mock payloads
+//! therefore model `Repos4User` faithfully — notably `visibility_level`
+//! is a **string** (the upstream spec aliases `Visibility = String`) and
+//! timestamps sit in `updated_at`, not `last_activity_at`.
 
 mod common;
 
@@ -16,9 +21,9 @@ async fn repo_view_default_card_output() {
             "name": "feedback",
             "path": "cnb/feedback",
             "description": "the official feedback repo",
-            "visibility_level": 0,
+            "visibility_level": "public",
             "default_branch": "main",
-            "last_activity_at": "2026-01-01T00:00:00Z"
+            "updated_at": "2026-01-01T00:00:00Z"
         })))
         .mount(&server)
         .await;
@@ -44,7 +49,7 @@ async fn repo_view_json_passthrough() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "feedback",
             "path": "cnb/feedback",
-            "visibility_level": 20
+            "visibility_level": "private"
         })))
         .mount(&server)
         .await;
@@ -57,7 +62,7 @@ async fn repo_view_json_passthrough() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"visibility_level\""))
-        .stdout(predicate::str::contains("20"));
+        .stdout(predicate::str::contains("\"private\""));
 }
 
 #[tokio::test]
@@ -66,8 +71,10 @@ async fn repo_list_user_emits_tsv_when_piped() {
     Mock::given(method("GET"))
         .and(path("/users/alice/repos"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"name": "first", "path": "alice/first", "visibility_level": 0, "last_activity_at": "2026-01-02"},
-            {"name": "second", "path": "alice/second", "description": "stuff", "visibility_level": 20, "last_activity_at": "2026-01-03"}
+            {"name": "first",  "path": "alice/first",  "visibility_level": "public",
+             "updated_at": "2026-01-02"},
+            {"name": "second", "path": "alice/second", "description": "stuff",
+             "visibility_level": "private", "updated_at": "2026-01-03"}
         ])))
         .mount(&server)
         .await;

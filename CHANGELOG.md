@@ -7,6 +7,38 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 1)
+
+- `cnb repo view` and `cnb repo list` now route through the typed SDK
+  (`cnb_sdk::repositories::RepositoriesClient`). Dispatch mirrors the
+  cnb-api facade: no `target` → `GET /user/repos`, slug with `/` → `GET
+  /{slug}/-/repos`, bare username → `GET /users/{u}/repos`.
+- `Context::sdk_raw_get(path)`: shared helper for SDK-backed commands
+  that still need faithful `Value` passthrough on `--json` / `--jq` /
+  `--template` (e.g. `repo view`'s `default_branch` field is not in the
+  typed DTO). Routes through the SDK's own reqwest pool so retry / auth
+  / tracing semantics match the typed calls byte-for-byte.
+- `Context::effective_sdk_base_url()` (internal): single source of truth
+  for base-URL resolution — explicit override > `CNB_API_BASE` > SDK
+  default. Removes the last bit of duplicated logic between `sdk()` and
+  the new raw helper.
+- `format_visibility()` on `commands::repo`: tolerant display formatter
+  that accepts both the spec's canonical string form
+  (`"public"`/`"internal"`/`"private"`) and the legacy integer encoding
+  (`0`/`10`/`20`) some older servers still emit. Unit-tested.
+
+### Changed
+
+- The SDK-typed `Repos4User` DTO aliases `visibility_level` to
+  `Visibility = String`, so all `cnb repo view/list` wiremock fixtures
+  now model it as a string. The previous integer encoding used by
+  hand-written mocks was a bug that only worked because the old facade
+  re-parsed raw `Value` and made its own guesses.
+- `view` endpoint is fetched twice on purpose for SDK-backed single-
+  object views: once typed (catches schema regressions) and once as raw
+  `Value` (faithful rendering). Both hit the same reqwest connection
+  pool — extra cost is one round-trip on a single object, negligible.
+
 ### Added (cnb-api → typed SDK migration, Phase 1)
 
 - Depend on external crate `cnb = "0.2"` (aliased as `cnb-sdk` in workspace
