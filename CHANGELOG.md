@@ -7,6 +7,32 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.5)
+
+- **`cnb label` is now backed entirely by the typed SDK**
+  (`cnb_sdk::repo_labels`). This is the **first command group ported
+  in full**, including write paths (`create` / `edit` / `delete`).
+  All four endpoints map cleanly: list → `GET /{repo}/-/labels`,
+  create → `POST`, edit → `PATCH /{name}`, delete → `DELETE /{name}`.
+- `ensure_label_name_safe()` guard mirrors the path-traversal check
+  the cnb-api facade had (the SDK does not encode user-controlled
+  path segments). Rejects `/` and empty names with `BadArgs` (exit
+  3) before any HTTP round-trip. 4 unit tests + 1 integration test
+  for `label delete evil/../leak`.
+- 5 new wiremock integration tests covering write paths:
+  `edit --description`, `edit` with no fields (exit 3),
+  `delete --yes`, `delete` without `--yes` in non-TTY (exit 3),
+  `delete` with `/` in name (exit 3 before network).
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I10** (new): user-controlled identifiers interpolated into
+  request paths (`format!("/{repo}/-/labels/{name}", …)`) are not
+  validated or percent-encoded by the SDK. A label named `..` is
+  silently routed to a different endpoint. Severity: annoyance —
+  every consumer has to mirror the validation. Documented our
+  workaround.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.4)
 
 - `cnb pr view` and `cnb pr list` (and their `cnb mr …` aliases) now

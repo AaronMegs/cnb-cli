@@ -259,6 +259,47 @@ Each entry has:
   that wants branch info on a PR. Every consumer has to reinvent
   `read_branch`.
 
+### SDK-I10 · No path-segment validation on user-controlled identifiers
+
+- **Surface**: every resource client method that interpolates a
+  user-controlled string into the request path. Concretely observed
+  on:
+  - `cnb::repo_labels::RepoLabelsClient::{delete_label, patch_label}`
+    — interpolate `name` into `/{repo}/-/labels/{name}`.
+  - The same pattern appears anywhere a method takes an identifier-
+    like `String` argument and embeds it via `format!("/{…}/{}/…",
+    arg)`. (Repos, issues, pulls all do this with structurally-safer
+    arguments — numeric ids, slugs already validated upstream — but
+    the convention is uniform.)
+- **Summary**: SDK methods build URLs with
+  `format!("/foo/{}/bar", arg).join_onto(base_url)`. If `arg`
+  contains a `/`, the slash is interpreted as a *path separator* by
+  `url::Url::join` rather than being percent-encoded as part of a
+  single segment. The SDK does not validate or encode the input. So
+  a label named `..` or `evil/../leak` is silently routed to a
+  different endpoint instead of producing a clean error.
+
+  This is **not exploitable** in practice for cnb.cool because the
+  server-side router will simply 404 on garbage paths, but it does
+  produce confusing error messages and turns a clean validation
+  failure into a noisy "endpoint not found" 5 layers down the stack.
+- **Workaround**: validate every user-controlled path component in
+  the CLI before calling into the SDK. Helpers like
+  `cnb-cli::commands::label::ensure_label_name_safe()` mirror the
+  guards `cnb-api::services::labels::ensure_no_slash()` already had,
+  returning `CliError::BadArgs` (exit 3) with a clear message
+  pointing at the offending input.
+- **Desired fix**: either:
+  1. Have the SDK percent-encode each path segment when building the
+     URL (the safe default — turns `evil/../leak` into a single
+     literal segment), or
+  2. Have the SDK reject components containing `/` with a typed
+     error and document the constraint on every affected method.
+- **Severity**: annoyance — easy enough to mirror the validation in
+  every consumer, but it is the kind of thing that *should* be
+  centralised so consumers do not silently disagree on what is
+  rejected.
+
 ---
 
 ## Resolved issues

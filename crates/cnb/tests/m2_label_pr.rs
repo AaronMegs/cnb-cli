@@ -67,6 +67,108 @@ async fn label_create_with_color_succeeds() {
 }
 
 #[tokio::test]
+async fn label_edit_sends_patch_with_partial_form() {
+    // Only `--description` is given; `new_name` and `color` must NOT be
+    // sent (they would clear server-side fields). The SDK form types
+    // these as `Option<String>` and skip-serialises None, so a
+    // body_partial_json on `description` proves the right shape.
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/cnb/feedback/-/labels/needs-triage"))
+        .and(body_partial_json(json!({"description": "drop me"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "needs-triage",
+            "description": "drop me"
+        })))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args([
+            "label",
+            "edit",
+            "needs-triage",
+            "cnb/feedback",
+            "--description",
+            "drop me",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("✓ Edited label `needs-triage`"));
+}
+
+#[tokio::test]
+async fn label_edit_with_no_fields_errors_with_exit_3() {
+    // No --new-name / --color / --description. Must refuse before
+    // touching the network — mock nothing.
+    let server = MockServer::start().await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["label", "edit", "needs-triage", "cnb/feedback"])
+        .assert()
+        .failure()
+        .code(3);
+}
+
+#[tokio::test]
+async fn label_delete_with_yes_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/cnb/feedback/-/labels/old"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["label", "delete", "old", "cnb/feedback", "--yes"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("✓ Deleted label `old`"));
+}
+
+#[tokio::test]
+async fn label_delete_without_yes_in_non_tty_aborts() {
+    // No `--yes`, stdin is a pipe (assert_cmd default) -> must refuse.
+    let server = MockServer::start().await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["label", "delete", "old", "cnb/feedback"])
+        .assert()
+        .failure()
+        .code(3);
+}
+
+#[tokio::test]
+async fn label_delete_with_slash_in_name_is_rejected_locally() {
+    // Path-traversal guard: a `/` in the label name must be rejected
+    // BEFORE the request hits the network. We mount nothing and rely on
+    // the assert that the command exits non-zero without any HTTP
+    // round-trip.
+    let server = MockServer::start().await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["label", "delete", "evil/../leak", "cnb/feedback", "--yes"])
+        .assert()
+        .failure()
+        .code(3);
+}
+
+#[tokio::test]
 async fn pr_view_renders_branch_arrow() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
