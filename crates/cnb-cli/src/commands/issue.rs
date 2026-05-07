@@ -1,5 +1,9 @@
 //! `cnb issue` — issues, comments, assignees, labels (M2 §8.3, 11 subcommands).
 //!
+//! `list` and `view` are backed by the typed SDK (`cnb-sdk`) as of Phase 2
+//! step 2.3; the remaining subcommands still route through the hand-written
+//! `cnb-api` facade and will be ported module-by-module.
+//!
 //! `create` and `comment` support `--attach FILE...` which streams each file
 //! through CNB's upload endpoints and appends the returned URL to the issue
 //! body / comment body as markdown.
@@ -9,6 +13,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use cnb_api::services::{issues, uploads};
 use cnb_api::Client;
+use cnb_sdk::issues::{ListIssuesQuery, ListUserIssuesQuery};
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -234,26 +239,61 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
 }
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    let mut q = format!("page={}&per_page={}", args.page, args.limit.max(1));
-    if args.state != "all" {
-        use std::fmt::Write;
-        write!(&mut q, "&state={}", args.state).expect("write to String");
-    }
-    let client = ctx.api()?;
-    let items = if args.mine {
-        issues::list_self(client, &q).await?
+    let page = i64::from(args.page);
+    let page_size = i64::from(args.limit.max(1));
+    // Upstream treats `all` specially (omit the query param); `open` and
+    // `closed` pass through verbatim.
+    let state = if args.state == "all" {
+        None
     } else {
-        let repo = ctx.resolve_repo(args.repo.as_deref())?;
-        let client = ctx.api()?; // re-borrow OK
-        issues::list(client, &repo, &q).await?
+        Some(args.state.clone())
     };
+
+    let items: Vec<Value> = if args.mine {
+        // `GET /user/issues` — issues assigned to / authored by the current
+        // token. The upstream query schema is a superset of the repo-scoped
+        // one; we only wire the fields our CLI currently exposes.
+        let mut q = ListUserIssuesQuery::new().page(page).page_size(page_size);
+        if let Some(s) = state {
+            q = q.state(s);
+        }
+        let client = ctx.sdk()?;
+        let dto = client.issues().list_user_issues(&q).await?;
+        // `UserIssue` -> generic Value for uniform rendering. Same
+        // Serialize guarantee as elsewhere.
+        serde_json::to_value(&dto)
+            .expect("UserIssue serialises infallibly")
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        // `GET /{repo}/-/issues` — repo-scoped listing. Typed response is
+        // `Vec<Issue>`.
+        let repo = ctx.resolve_repo(args.repo.as_deref())?;
+        let mut q = ListIssuesQuery::new().page(page).page_size(page_size);
+        if let Some(s) = state {
+            q = q.state(s);
+        }
+        let client = ctx.sdk()?;
+        let dto = client.issues().list_issues(repo, &q).await?;
+        serde_json::to_value(&dto)
+            .expect("Issue serialises infallibly")
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+
     let v = Value::Array(items.clone());
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
+
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let n = it.get("number").and_then(Value::as_i64).unwrap_or(0);
+        // The typed DTO pins `number` to a string, but older servers (and
+        // our legacy mocks) sometimes emit integers. Accept both on the
+        // display path so real-world responses keep rendering.
+        let n_display = format_issue_number(it.get("number"));
         let title = it.get("title").and_then(Value::as_str).unwrap_or("");
         let labels = it
             .get("labels")
@@ -266,7 +306,7 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
             })
             .unwrap_or_default();
         let upd = it.get("updated_at").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![format!("#{n}"), title.to_owned(), labels, upd.to_owned()]);
+        rows.push(vec![n_display, title.to_owned(), labels, upd.to_owned()]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(
@@ -280,8 +320,19 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
 
 async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = issues::view(client, &repo, args.number).await?;
+    // SDK pins issue numbers to `i64`. Our CLI accepts `u64` for API
+    // ergonomics; the cast is safe in practice (issue numbers never
+    // approach `i64::MAX`) but we guard it anyway.
+    let number_i64 = i64::try_from(args.number)
+        .map_err(|_| CliError::BadArgs(format!("issue number out of range: {}", args.number)))?;
+    // The `IssueDetail` DTO covers everything the CLI needs to render
+    // (title / state / body / author / labels / assignees), so a single
+    // typed call is sufficient — no raw-Value double-fetch required.
+    let dto = {
+        let client = ctx.sdk()?;
+        client.issues().get_issue(repo, number_i64).await?
+    };
+    let v = serde_json::to_value(&dto).expect("IssueDetail serialises infallibly");
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
@@ -290,7 +341,7 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     let body = v.get("body").and_then(Value::as_str).unwrap_or("");
     let author = v
         .get("author")
-        .and_then(|a| a.get("username"))
+        .and_then(|a| a.get("username").or_else(|| a.get("nickname")))
         .and_then(Value::as_str)
         .unwrap_or("?");
     println!("#{} {title}  [{state}]", args.number);
@@ -300,6 +351,20 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
         println!("{body}");
     }
     Ok(())
+}
+
+/// Display formatter for an issue's `number` field.
+///
+/// The upstream OpenAPI spec models issue numbers as strings, but several
+/// cnb.cool deployments still return integers. We accept either on the
+/// display path and always render as `#<n>` so the UX is stable regardless
+/// of how the server encodes the value.
+fn format_issue_number(raw: Option<&Value>) -> String {
+    match raw {
+        Some(Value::String(s)) => format!("#{s}"),
+        Some(Value::Number(n)) => format!("#{n}"),
+        _ => String::from("#?"),
+    }
 }
 
 async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
@@ -546,4 +611,29 @@ async fn append_attachments(
         }
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn format_issue_number_accepts_string() {
+        assert_eq!(format_issue_number(Some(&json!("42"))), "#42");
+        assert_eq!(format_issue_number(Some(&json!("1"))), "#1");
+    }
+
+    #[test]
+    fn format_issue_number_accepts_integer() {
+        assert_eq!(format_issue_number(Some(&json!(42))), "#42");
+        assert_eq!(format_issue_number(Some(&json!(0))), "#0");
+    }
+
+    #[test]
+    fn format_issue_number_falls_back_on_missing_or_null() {
+        assert_eq!(format_issue_number(None), "#?");
+        assert_eq!(format_issue_number(Some(&json!(null))), "#?");
+        assert_eq!(format_issue_number(Some(&json!([]))), "#?");
+    }
 }

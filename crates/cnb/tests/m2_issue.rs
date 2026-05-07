@@ -1,4 +1,10 @@
 //! M2: end-to-end coverage for `cnb issue …` against a wiremock backend.
+//!
+//! `list` and `view` are SDK-backed as of Phase 2 step 2.3; mock payloads
+//! follow the generated DTO shape — notably `number` is a **string**, not
+//! an integer, because the upstream OpenAPI spec aliases issue numbers to
+//! strings. The CLI display path tolerates both forms via
+//! `format_issue_number`.
 
 mod common;
 
@@ -13,8 +19,8 @@ async fn issue_list_jq_filter() {
     Mock::given(method("GET"))
         .and(path("/cnb/feedback/-/issues"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"number": 1, "title": "first", "labels": [{"name":"bug"}], "updated_at": "2026-01-02"},
-            {"number": 2, "title": "second", "labels": [], "updated_at": "2026-01-03"}
+            {"number": "1", "title": "first",  "labels": [{"name":"bug"}], "updated_at": "2026-01-02"},
+            {"number": "2", "title": "second", "labels": [],               "updated_at": "2026-01-03"}
         ])))
         .mount(&server)
         .await;
@@ -29,7 +35,9 @@ async fn issue_list_jq_filter() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines, vec!["1", "2"], "got: {stdout:?}");
+    // jq emits each element as a quoted JSON string literal (SDK DTO pins
+    // numbers to strings).
+    assert_eq!(lines, vec!["\"1\"", "\"2\""], "got: {stdout:?}");
 }
 
 #[tokio::test]
@@ -38,7 +46,7 @@ async fn issue_view_renders_card() {
     Mock::given(method("GET"))
         .and(path("/cnb/feedback/-/issues/42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "number": 42,
+            "number": "42",
             "title": "the answer",
             "state": "open",
             "body": "details here",

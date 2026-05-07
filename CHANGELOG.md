@@ -7,6 +7,24 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.3)
+
+- `cnb issue view` and `cnb issue list` (both the repo-scoped path and the
+  `--mine` / `/user/issues` variant) now go through the typed SDK
+  (`cnb_sdk::issues::IssuesClient`). The typed `IssueDetail` DTO is rich
+  enough that `view` uses a single typed call — no raw-Value double-fetch
+  is needed (unlike `repo view` — see SDK-I02).
+- `format_issue_number()` helper on `commands::issue`: tolerant display
+  formatter mirroring `format_visibility`. Accepts both the spec's
+  canonical string form and the legacy integer encoding that older
+  cnb.cool deployments still emit. Unit-tested with 3 cases.
+- `docs/sdk-issues.md`: running log of SDK-side friction points
+  discovered during Phase 2 (so far: `pub(crate)` on `HttpInner::url`,
+  missing `default_branch` in `Repos4User`, `Visibility` string / int
+  ambiguity, crate-name collision, missing `#[non_exhaustive]`,
+  unreachable upstream repo URL, and the freshly minted SDK-I07 about
+  `get_issue(number: i64)` vs `Issue.number: Option<String>`).
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 1)
 
 - `cnb repo view` and `cnb repo list` now route through the typed SDK
