@@ -1,9 +1,14 @@
 //! `cnb pr` — pull requests (M2 §8.4, 12 subcommands). `cnb mr` is a CLI alias.
+//!
+//! `list` and `view` are backed by the typed SDK (`cnb-sdk`) as of Phase 2
+//! step 2.4; the remaining subcommands still route through the hand-written
+//! `cnb-api` facade and will be ported module-by-module.
 
 use std::process::Command;
 
 use clap::{Args, Subcommand};
 use cnb_api::services::pulls;
+use cnb_sdk::pulls::ListPullsQuery;
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -251,26 +256,32 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let mut q = format!("page={}&per_page={}", args.page, args.limit.max(1));
+    let page = i64::from(args.page);
+    let page_size = i64::from(args.limit.max(1));
+    // Upstream treats `all` specially (omit the query param); `open`,
+    // `closed` and `merged` pass through verbatim.
+    let mut q = ListPullsQuery::new().page(page).page_size(page_size);
     if args.state != "all" {
-        use std::fmt::Write;
-        write!(&mut q, "&state={}", args.state).expect("write to String");
+        q = q.state(args.state.clone());
     }
-    let client = ctx.api()?;
-    let items = pulls::list(client, &repo, &q).await?;
-    let v = Value::Array(items.clone());
+    let items = {
+        let client = ctx.sdk()?;
+        client.pulls().list_pulls(repo, &q).await?
+    };
+    let v = serde_json::to_value(&items).expect("PullRequest serialises infallibly");
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let mut rows = Vec::with_capacity(items.len());
-    for it in &items {
-        let n = it.get("number").and_then(Value::as_i64).unwrap_or(0);
+    let arr = v.as_array().cloned().unwrap_or_default();
+    let mut rows = Vec::with_capacity(arr.len());
+    for it in &arr {
+        let n_display = format_pr_number(it.get("number"));
         let title = it.get("title").and_then(Value::as_str).unwrap_or("");
-        let head = it.get("source_branch").and_then(Value::as_str).unwrap_or("");
-        let base = it.get("target_branch").and_then(Value::as_str).unwrap_or("");
+        let head = read_branch(it.get("head"), it.get("source_branch"));
+        let base = read_branch(it.get("base"), it.get("target_branch"));
         let created = it.get("created_at").and_then(Value::as_str).unwrap_or("");
         rows.push(vec![
-            format!("#{n}"),
+            n_display,
             title.to_owned(),
             format!("{head}->{base}"),
             created.to_owned(),
@@ -288,15 +299,23 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
 
 async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = pulls::view(client, &repo, args.number).await?;
+    // SDK pins the PR number argument to `String` (unlike issues which use
+    // `i64` — see SDK-I07 / SDK-I08 in docs/sdk-issues.md). Our CLI accepts
+    // `u64` for ergonomics; the string formatting below performs the
+    // conversion at the boundary.
+    let number_str = args.number.to_string();
+    let dto = {
+        let client = ctx.sdk()?;
+        client.pulls().get_pull(repo, number_str).await?
+    };
+    let v = serde_json::to_value(&dto).expect("Pull serialises infallibly");
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
     let title = v.get("title").and_then(Value::as_str).unwrap_or("");
     let state = v.get("state").and_then(Value::as_str).unwrap_or("?");
-    let head = v.get("source_branch").and_then(Value::as_str).unwrap_or("");
-    let base = v.get("target_branch").and_then(Value::as_str).unwrap_or("");
+    let head = read_branch(v.get("head"), v.get("source_branch"));
+    let base = read_branch(v.get("base"), v.get("target_branch"));
     let body = v.get("body").and_then(Value::as_str).unwrap_or("");
     println!("#{} {title}  [{state}]", args.number);
     println!("  {head} → {base}");
@@ -305,6 +324,44 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
         println!("{body}");
     }
     Ok(())
+}
+
+/// Display formatter for a PR's `number` field.
+///
+/// SDK DTOs (`Pull`, `PullRequest`) type `number` as `Option<String>`; the
+/// legacy cnb-api facade emitted it as an integer. Accept both on the
+/// display path so real-world responses keep rendering.
+fn format_pr_number(raw: Option<&Value>) -> String {
+    match raw {
+        Some(Value::String(s)) => format!("#{s}"),
+        Some(Value::Number(n)) => format!("#{n}"),
+        _ => String::from("#?"),
+    }
+}
+
+/// Extract a branch name from a PR's `head` / `base` field.
+///
+/// The SDK types these as `Option<serde_json::Value>` because the upstream
+/// OpenAPI spec does not pin their schema. Real servers return one of:
+///   * a flat `{head: {branch: "feat/x"}}` or `{head: {ref: "feat/x"}}`
+///   * a slightly richer object with `{name, commit_id, …}` nested under
+///   * or, on legacy deployments, a sibling top-level string field
+///     (`source_branch` / `target_branch`) the SDK wholly drops.
+///
+/// We try each shape in order of specificity so the card always renders a
+/// branch name when one is present, regardless of which encoding the
+/// server chose.
+fn read_branch(primary: Option<&Value>, fallback: Option<&Value>) -> String {
+    if let Some(obj) = primary {
+        for key in ["branch", "ref", "name"] {
+            if let Some(s) = obj.get(key).and_then(Value::as_str) {
+                if !s.is_empty() {
+                    return s.to_owned();
+                }
+            }
+        }
+    }
+    fallback.and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
 async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
@@ -534,4 +591,63 @@ fn current_branch() -> Result<String, CliError> {
         ));
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn format_pr_number_accepts_string() {
+        assert_eq!(format_pr_number(Some(&json!("7"))), "#7");
+        assert_eq!(format_pr_number(Some(&json!("42"))), "#42");
+    }
+
+    #[test]
+    fn format_pr_number_accepts_integer() {
+        // Legacy encoding — some deployments still emit this.
+        assert_eq!(format_pr_number(Some(&json!(7))), "#7");
+        assert_eq!(format_pr_number(Some(&json!(0))), "#0");
+    }
+
+    #[test]
+    fn format_pr_number_missing_or_null_falls_back() {
+        assert_eq!(format_pr_number(None), "#?");
+        assert_eq!(format_pr_number(Some(&json!(null))), "#?");
+        assert_eq!(format_pr_number(Some(&json!([]))), "#?");
+    }
+
+    #[test]
+    fn read_branch_prefers_primary_branch_subfield() {
+        let primary = json!({"branch": "feat/shiny", "commit_id": "abc"});
+        assert_eq!(read_branch(Some(&primary), None), "feat/shiny");
+    }
+
+    #[test]
+    fn read_branch_tries_alternate_keys_in_order() {
+        let r_only = json!({"ref": "main"});
+        assert_eq!(read_branch(Some(&r_only), None), "main");
+        let name_only = json!({"name": "release"});
+        assert_eq!(read_branch(Some(&name_only), None), "release");
+    }
+
+    #[test]
+    fn read_branch_falls_back_to_legacy_top_level_string() {
+        // Primary is absent / empty object → fall back to the sibling
+        // top-level string field (source_branch / target_branch on older
+        // servers).
+        assert_eq!(read_branch(None, Some(&json!("legacy-branch"))), "legacy-branch");
+        let empty_obj = json!({});
+        assert_eq!(
+            read_branch(Some(&empty_obj), Some(&json!("legacy-branch"))),
+            "legacy-branch"
+        );
+    }
+
+    #[test]
+    fn read_branch_returns_empty_when_nothing_present() {
+        assert_eq!(read_branch(None, None), "");
+        assert_eq!(read_branch(Some(&json!({})), None), "");
+    }
 }

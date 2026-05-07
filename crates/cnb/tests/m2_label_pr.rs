@@ -1,4 +1,16 @@
 //! M2: end-to-end coverage for `cnb label …` and `cnb pr …`.
+//!
+//! `pr view` / `pr list` are SDK-backed as of Phase 2 step 2.4. Mock
+//! payloads therefore follow the generated `Pull` / `PullRequest` DTO
+//! shapes:
+//!
+//!   * `number` is a **string** (SDK aliases it to `Option<String>`).
+//!   * Branch info lives under nested `head` / `base` objects (the SDK
+//!     types these as `Option<serde_json::Value>` since the upstream
+//!     spec does not pin their schema). The CLI `read_branch` helper
+//!     tries `branch`, `ref`, then `name` in order, falling back to
+//!     legacy top-level `source_branch` / `target_branch` strings on
+//!     older servers.
 
 mod common;
 
@@ -60,11 +72,11 @@ async fn pr_view_renders_branch_arrow() {
     Mock::given(method("GET"))
         .and(path("/cnb/feedback/-/pulls/7"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "number": 7,
+            "number": "7",
             "title": "feat: shiny",
             "state": "open",
-            "source_branch": "feat/shiny",
-            "target_branch": "main",
+            "head": {"branch": "feat/shiny"},
+            "base": {"branch": "main"},
             "body": "Adds the shiny widget."
         })))
         .mount(&server)
@@ -109,8 +121,8 @@ async fn mr_alias_resolves_to_pr() {
     Mock::given(method("GET"))
         .and(path("/cnb/feedback/-/pulls/1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "number": 1, "title": "hi", "state": "open",
-            "source_branch": "f", "target_branch": "main"
+            "number": "1", "title": "hi", "state": "open",
+            "head": {"branch": "f"}, "base": {"branch": "main"}
         })))
         .mount(&server)
         .await;

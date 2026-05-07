@@ -154,30 +154,110 @@ Each entry has:
   source.gc etc.).
 - **Severity**: polish.
 
-### SDK-I07 · Issue number type is inconsistent across the SDK surface
+### SDK-I07 · Issue / Pull number type is inconsistent across the SDK surface
 
-- **Surface**: `cnb::issues::IssuesClient::get_issue(repo, number: i64)`
-  vs `cnb::models::{Issue, IssueDetail, UserIssue}.number: Option<String>`
-- **Summary**: The typed `get_issue` method takes `number: i64`, yet the
-  DTO it returns (and every other issue DTO) types `number` as
+- **Surface**:
+  - `cnb::issues::IssuesClient::get_issue(repo, number: i64)` vs
+    `cnb::models::{Issue, IssueDetail, UserIssue}.number: Option<String>`
+  - `cnb::pulls::PullsClient::get_pull(repo, number: String)` vs
+    `cnb::models::{Pull, PullRequest}.number: Option<String>`
+- **Summary**: The typed `get_issue` method takes `number: i64`, yet
+  the DTO it returns (and every other issue DTO) types `number` as
   `Option<String>`. The same mismatch appears on the related endpoints
-  (`list_issue_comments`, `get_issue_comment`, `update_issue`, etc — all
-  take `i64` arguments but return string-valued `number`s). That forces
-  every CLI consumer to convert between the two at the boundary and
-  pushes an implicit assertion about what formats of issue number the
-  server accepts.
-- **Workaround**: `cnb-cli::commands::issue` passes `i64` to
-  `get_issue`, converting from the CLI's `u64` parameter type through
-  `i64::try_from`. The CLI display layer uses
-  `format_issue_number(Option<&Value>)` which tolerates both string and
-  integer encodings on the response side.
-- **Desired fix**: pick one representation and apply it everywhere. If
-  the spec really does want strings (e.g. to support sparse / scoped
+  (`list_issue_comments`, `get_issue_comment`, `update_issue`, etc —
+  all take `i64` arguments but return string-valued `number`s). That
+  forces every CLI consumer to convert between the two at the boundary
+  and pushes an implicit assertion about what formats of issue number
+  the server accepts.
+
+  The `pulls` family is *internally* consistent (`get_pull(number:
+  String)` + `Pull.number: Option<String>` — both strings), but
+  *cross-module* it is inconsistent with `issues`: the same kind of
+  "numeric resource id" is `i64` for issues and `String` for pulls.
+  A CLI that threads both through the same types is forced to pick a
+  favourite.
+- **Workaround**:
+  - `cnb-cli::commands::issue` passes `i64` to `get_issue`, converting
+    from the CLI's `u64` parameter type through `i64::try_from`.
+  - `cnb-cli::commands::pr` converts `args.number: u64` via
+    `.to_string()` before calling `get_pull`.
+  - Both CLI display layers use the same pattern
+    (`format_issue_number` / `format_pr_number`) to tolerate string
+    *and* integer encodings on the response side.
+- **Desired fix**: pick one representation and apply it everywhere.
+  If the spec really does want strings (to support sparse / scoped
   numbering), change the method arguments to `&str` / `String`.
-  Otherwise, normalise the DTO to `Option<i64>`.
+  Otherwise, normalise the DTO to `Option<i64>`. Either way, make the
+  choice uniform across `issues` and `pulls` — they model analogous
+  concepts and should not disagree.
 - **Severity**: annoyance — the conversion dance is contagious: any
   downstream code that threads issue numbers through its own layers
   has to pick one side and stick with it.
+
+### SDK-I08 · Same resource, two different DTOs (`Pull` vs `PullRequest`)
+
+- **Surface**: `cnb::pulls::PullsClient`
+  - `get_pull()` returns `cnb::models::Pull`
+  - `list_pulls()` returns `Vec<cnb::models::PullRequest>`
+- **Summary**: Two generated structs for the same underlying resource,
+  with overlapping but subtly different field sets:
+
+  | field          | `Pull`                           | `PullRequest`                     |
+  |----------------|----------------------------------|-----------------------------------|
+  | `labels`       | `Vec<LabelInfo>`                 | `Vec<Label>`                      |
+  | `comment_count`| absent                           | `Option<i64>`                     |
+  | `review_count` | absent                           | `Option<i64>`                     |
+  | `repo`         | absent                           | `Option<serde_json::Value>`       |
+  | `created_at`   | absent                           | `Option<String>`                  |
+  | `last_acted_at`| absent                           | `Option<String>`                  |
+  | `reviewers`    | `Vec<PullReviewer>`              | absent                            |
+  | `updated_at`   | `Option<String>`                 | `Option<String>`                  |
+
+  This mirrors the upstream spec's distinction between "detail view" and
+  "list item" — valid in theory, but painful in practice: a CLI that
+  wants to share rendering code between `list` and `view` either has to
+  pick the lowest common denominator (and lose typed access to a handful
+  of fields) or deal with two parallel `match` arms.
+- **Workaround**: Convert both DTOs to `serde_json::Value` at the
+  rendering boundary in `commands::pr::{list, view}` and read every
+  field through `Value::get()`. This loses the benefit of typed access
+  on the hot path, but keeps a single render function.
+- **Desired fix**: generate a single `Pull` struct with an optional
+  `stats: Option<PullStats>` sub-struct (or similar) for the
+  list-only bean counters. Alternatively, `#[serde(flatten)]` the
+  shared portion into both so downstream code can destructure a
+  common view. Cross-reference with the `Issue` / `IssueDetail`
+  divergence, which has the same shape.
+- **Severity**: annoyance.
+
+### SDK-I09 · `head` / `base` fields are untyped `Option<Value>`
+
+- **Surface**: `cnb::models::{Pull, PullRequest}.{head, base}: Option<serde_json::Value>`
+- **Summary**: Pull request head/base branch information — one of the
+  most-frequently-rendered fields in any MR UI — is typed as
+  `Option<serde_json::Value>`. The upstream OpenAPI spec does not pin
+  the schema, so the SDK correctly refuses to commit to a shape. But
+  downstream consumers still have to extract a branch name to render
+  anything useful, and the real server returns at least three
+  different shapes across deployments:
+  - `{head: {branch: "feat/x", commit_id: "abc"}}`
+  - `{head: {ref: "refs/heads/feat/x"}}`
+  - `{head: {name: "feat/x"}}`
+  - Plus a legacy top-level sibling field `source_branch` / `target_branch`
+    that the SDK drops entirely because it is not in the DTO.
+- **Workaround**: `cnb-cli::commands::pr::read_branch()` tries each of
+  `branch`, `ref`, `name` on the primary object in order, then falls
+  back to a sibling top-level string (kept only for legacy
+  deployments). Unit-tested with 5 cases covering every observed shape.
+- **Desired fix**: settle the spec on one canonical encoding (ideally
+  `{branch: "…", commit_id: "…"}` since that matches the server's
+  current default), promote it to a real DTO (`PullRef` /
+  `BranchSnapshot`), and type `head`/`base` as `Option<PullRef>`. This
+  would turn a best-effort `read_branch` helper into a one-liner like
+  `v.head.as_ref().and_then(|r| r.branch.as_deref()).unwrap_or_default()`.
+- **Severity**: blocker-adjacent — not for compilation, but for any UI
+  that wants branch info on a PR. Every consumer has to reinvent
+  `read_branch`.
 
 ---
 

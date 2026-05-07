@@ -7,6 +7,46 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.4)
+
+- `cnb pr view` and `cnb pr list` (and their `cnb mr …` aliases) now
+  route through the typed SDK (`cnb_sdk::pulls::PullsClient`). Like
+  `cnb issue view`, a single typed call is enough for `view` — the
+  `Pull` DTO already carries every field the CLI card renders.
+- `format_pr_number()` and `read_branch()` helpers on
+  `commands::pr`: the first mirrors `format_issue_number` (accepts
+  string / integer / null); the second absorbs the upstream spec's
+  wobble on PR head/base encoding (tries `branch`, `ref`, `name` on
+  the typed object, then a legacy top-level sibling string). 7 new
+  unit tests total.
+
+### Changed
+
+- `m2_label_pr` wiremock fixtures updated to the SDK DTO shape:
+  `number` is now a string, and branch info lives inside nested
+  `head: {branch}` / `base: {branch}` objects instead of top-level
+  `source_branch` / `target_branch` strings. Real cnb.cool servers
+  return the nested form; the CLI still accepts the legacy one via
+  `read_branch` fallback.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I07** extended: the inconsistency is not just inside `issues`
+  — it is also *across modules*. `get_issue` takes `i64` numbers and
+  `get_pull` takes `String` numbers for analogous concepts. Both DTOs
+  type the value as `Option<String>`. Logged.
+- **SDK-I08** (new): the `pulls` resource ships two overlapping
+  structs — `Pull` (returned by `get_pull`) and `PullRequest`
+  (returned by `list_pulls`). Field sets overlap but do not match
+  exactly (different `labels` types, `PullRequest`-only
+  `comment_count` / `review_count` / `repo` / `created_at`,
+  `Pull`-only `reviewers`). CLI serialises both through Value for
+  uniform rendering.
+- **SDK-I09** (new): `Pull.head` / `Pull.base` are untyped
+  `Option<serde_json::Value>`. Every consumer has to reinvent a
+  "branch-name extractor". Our `read_branch` helper covers the three
+  observed shapes + the legacy top-level fallback.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.3)
 
 - `cnb issue view` and `cnb issue list` (both the repo-scoped path and the
