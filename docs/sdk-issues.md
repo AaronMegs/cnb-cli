@@ -367,6 +367,67 @@ Each entry has:
   returns just the `Vec<Forks>`.
 - **Severity**: polish.
 
+### SDK-I14 · No non-JSON transport surface — bytes endpoints need a side-car reqwest client
+
+- **Surface**: `cnb::http::HttpInner::{execute, execute_with_body}`
+  - `execute::<T>(method, url)` — no body, decodes response as `T`
+    via `serde_json::from_slice`.
+  - `execute_with_body::<T, B>(method, url, body)` — attaches body
+    with `req.json(b)` (sets `Content-Type: application/json`),
+    decodes response as `T`.
+  - `cnb::releases::ReleasesClient::get_releases_asset` returns
+    `serde_json::Value` for an endpoint whose real response is
+    either a 302 redirect to a pre-signed URL or the file bytes
+    themselves — trying to JSON-decode bytes yields a parse error.
+- **Summary**: The SDK's shared HTTP layer is JSON-only on both
+  the request and response legs. Two legitimate CNB flows need
+  raw bytes:
+  1. **Two-phase release asset upload**, phase 2: `PUT
+     <pre-signed upload_url>` with file bytes as the body. The SDK
+     cannot express this — `execute_with_body` forces a JSON body.
+  2. **Release asset download**: `GET /{repo}/-/releases/download/{tag}/{filename}`
+     returns a 302 to a signed URL whose body is file bytes.
+     `get_releases_asset` on the SDK decodes that body as
+     `serde_json::Value` and fails on anything non-JSON.
+
+  Neither flow can use the SDK's connection pool, retry logic, auth
+  header, or tracing. They also cannot reuse the SDK's resolved
+  token — the SDK does not expose the underlying `reqwest::Client`
+  either (only `&HttpInner`, which has no `fn client()` accessor),
+  so consumers re-read `CNB_TOKEN` from the env and build a fresh
+  `reqwest::Client`.
+- **Workaround**: `cnb-cli::commands::release` keeps a small side-
+  car pattern:
+  - Phase 1 (`POST asset-upload-url`) → typed SDK via
+    `post_release_asset_upload_url`.
+  - Phase 2 (`PUT upload_url`) → standalone `reqwest::Client::new()`
+    with `reqwest::Body::wrap_stream(ReaderStream::new(File::open))`.
+    No auth header (the pre-signed URL authorises via its own query
+    params).
+  - Phase 3 (`POST verify_url`) → reuses the SDK's `HttpInner::execute`
+    because the verify endpoint *does* return JSON and the SDK's
+    `execute(method, url)` accepts an arbitrary absolute `Url`.
+  - Download → standalone `reqwest::Client::new()`, `CNB_TOKEN`
+    read from env for `bearer_auth`. Same base-URL precedence
+    (`CNB_API_BASE` > default) as the SDK to keep wiremock fixtures
+    working.
+- **Desired fix**: one of
+  1. Add `pub fn HttpInner::reqwest_client(&self) -> &reqwest::Client`
+     so consumers can build ad-hoc requests (bytes PUT, streaming
+     GET) that still share the SDK's connection pool and base-URL
+     machinery.
+  2. Extend `execute_with_body` (or add a sibling) that accepts an
+     arbitrary `reqwest::Body` instead of constraining the body to
+     `Serialize`. Plus a streaming-response variant
+     (`execute_bytes`) that returns `bytes::Bytes` instead of `T`.
+  3. Model the two-phase upload + download endpoints as first-class
+     typed methods (`upload_release_asset(path: impl AsRef<Path>)`,
+     `download_release_asset(..) -> bytes::Bytes`) so downstream
+     code never reaches for the raw HTTP layer at all.
+- **Severity**: annoyance — works via the side-car, but duplicates
+  connection-pool + auth concerns across two HTTP clients per run
+  of `cnb release upload` / `cnb release download`.
+
 ---
 
 ## Resolved issues

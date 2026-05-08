@@ -7,6 +7,59 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.7)
+
+- **`cnb release` — all 9 subcommands ported to the typed SDK**
+  (`cnb_sdk::releases::ReleasesClient`). Covers `list` / `view`
+  (by tag / `--id` / `--latest`) / `create` / `edit` / `delete` /
+  `upload` / `download` / `asset-view` / `asset-delete`.
+- The **two-phase asset upload** now mixes the SDK and a small
+  side-car `reqwest::Client`:
+  - Phase 1 (`POST asset-upload-url`) uses the typed SDK
+    (`post_release_asset_upload_url` → `ReleaseAssetUploadUrl`).
+  - Phase 2 (`PUT upload_url` with streamed file bytes) bypasses
+    the SDK — the SDK's shared HTTP layer is JSON-only and cannot
+    express a raw-bytes body. Uses `reqwest::Body::wrap_stream` +
+    `tokio_util::io::ReaderStream` directly. See SDK-I14.
+  - Phase 3 (`POST verify_url`) reuses the SDK's
+    `HttpInner::execute(method, url)` — the verify URL is absolute
+    but the SDK accepts that, and the response is JSON.
+- `cnb release download` also uses the standalone
+  `reqwest::Client` path: the SDK's `get_releases_asset` decodes
+  the response as `serde_json::Value` which is wrong for a bytes
+  endpoint. Base-URL precedence mirrors the SDK
+  (`CNB_API_BASE` > default) so wiremock fixtures keep working.
+
+### Test additions
+
+- 2 new wiremock integration tests in `m3_release`:
+  - `release_download_writes_bytes_to_output_dir` — covers the
+    new raw-bytes download path end-to-end (GET → write to
+    `--output` dir → on-disk content assertion).
+  - `release_asset_view_emits_json_when_flag_set` — validates
+    that the typed `get_release_asset` → `ReleaseAsset` →
+    `serde_json::Value` render chain preserves every rendered
+    field under `--json`.
+  - Existing `release_upload_runs_two_phase_chain` now covers
+    the SDK + side-car hybrid flow. Total project test count:
+    208 → 210.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I14** (new): the SDK's `HttpInner` is JSON-only on both
+  request and response sides. Two legitimate flows — two-phase
+  upload phase 2 (raw PUT) and release asset download (bytes
+  body) — cannot use the SDK at all. Consumers must build a side-
+  car `reqwest::Client`, which also means they cannot reuse the
+  SDK's connection pool or resolved token (no public
+  `reqwest_client()` accessor on `HttpInner`).
+
+### Changed
+
+- `cnb-cli` now depends on `tokio-util` (feature `io`) for the
+  `ReaderStream` used by the release-upload phase 2 PUT. Was
+  previously only pulled in transitively via `cnb-api`.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.6)
 
 - `cnb repo` write paths — `create`, `edit`, `delete`, `archive`,

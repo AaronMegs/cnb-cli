@@ -155,7 +155,7 @@ cnb api /user --template '{username}: {email}'
 | **M5.0**  | ✅ done    | `cnb update`, `release.yml`, `scripts/install.sh`, CI hardening                |
 | **M5.1**  | ✅ done    | man pages + 5-shell completions baked into release archives, cosign keyless signing, mdbook handbook scaffold, Homebrew/Scoop manifest templates |
 | **SDK-1** | ✅ done    | Phase 1 of the cnb-api → typed SDK migration: depends on external crate `cnb = "0.2"`, pilots it via new `cnb search` (first consumer), keeps `cnb-api` facades in place for all other commands |
-| **SDK-2** | in progress | Phase 2: port commands to SDK module-by-module. Done: **`cnb repo` (10/14 first-party verbs — read + writes)**, `cnb issue view/list`, `cnb pr view/list`, `cnb label` (full set). Next: `cnb release` (full set, two-phase upload), then `cnb build/workspace`, then `cnb registry/mission/org` |
+| **SDK-2** | in progress | Phase 2: port commands to SDK module-by-module. Done: **`cnb repo` (10/14 first-party verbs — read + writes)**, `cnb issue view/list`, `cnb pr view/list`, `cnb label` (full set), **`cnb release` (full set, incl. two-phase upload + bytes download via side-car `reqwest` — see SDK-I14)**. Next: `cnb build/workspace`, then `cnb registry/mission/org` |
 | **M5.2**  | partial    | apt / yum repos, Docker image — needs external infra (out of band) |
 | **M6**    | partial    | sigstore signing ✅; mdbook deploy + external case study — out of band |
 

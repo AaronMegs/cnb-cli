@@ -6,13 +6,29 @@
 //! trailing optional positional `repo` would make clap unable to disambiguate
 //! values reliably (e.g. `release view cnb/feedback` could be tag-or-repo).
 //! This matches `gh release` conventions.
+//!
+//! ## SDK backing (Phase 2, Step 2.7)
+//!
+//! All nine subcommands are ported to the typed `cnb_sdk::releases` API.
+//! The one place the typed SDK cannot cover on its own is the file-bytes
+//! hop: phase-2 of `upload` (raw `PUT <upload_url>`) and the body-stream
+//! of `download` both need bytes-level access, while `HttpInner::execute`
+//! only sends / decodes JSON. We therefore keep a small ad-hoc
+//! `reqwest::Client` inside this module for those two calls. The rest of
+//! the flow (phase-1 `asset-upload-url`, phase-3 verify POST, list / view /
+//! create / edit / delete / asset-view / asset-delete) goes through the
+//! SDK's shared HTTP layer so auth / retry / tracing stay consistent.
+//! Tracked under `docs/sdk-issues.md` · SDK-I14.
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use cnb_api::services::releases;
+use cnb_sdk::models::{PatchReleaseForm, PostReleaseAssetUploadUrlForm, PostReleaseForm};
+use cnb_sdk::releases::ListReleasesQuery;
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
 use crate::context::Context;
 use crate::error::CliError;
@@ -224,22 +240,36 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
     Ok(false)
 }
 
+/// Serialise a typed SDK model back to `serde_json::Value` for rendering.
+///
+/// The render path expects dynamic access via `Value::get`, matching the
+/// behaviour when `cnb-api` returned raw `Value`s. Typed-first + convert is
+/// preferable to raw-only because the typed deserialisation already caught
+/// any schema regressions earlier in the pipeline.
+fn to_value<T: serde::Serialize>(t: &T) -> Result<Value, CliError> {
+    serde_json::to_value(t).map_err(|e| CliError::Generic(format!("serialise response: {e}")))
+}
+
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
-    let q = format!("page={}&page_size={}", args.page, args.limit.max(1));
-    let client = ctx.api()?;
-    let items = releases::list(client, &repo, &q).await?;
-    let v = Value::Array(items.clone());
+    let q = ListReleasesQuery::new()
+        .page(i64::from(args.page))
+        .page_size(i64::from(args.limit.max(1)));
+    let items = {
+        let client = ctx.sdk()?;
+        client.releases().list_releases(repo.clone(), &q).await?
+    };
+    let v = Value::Array(items.iter().map(to_value).collect::<Result<Vec<_>, _>>()?);
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let tag = it.get("tag_name").and_then(Value::as_str).unwrap_or("");
-        let name = it.get("name").and_then(Value::as_str).unwrap_or("");
-        let pub_at = it.get("published_at").and_then(Value::as_str).unwrap_or("");
-        let draft = it.get("draft").and_then(Value::as_bool).unwrap_or(false);
-        let pre = it.get("prerelease").and_then(Value::as_bool).unwrap_or(false);
+        let tag = it.tag_name.as_deref().unwrap_or("");
+        let name = it.name.as_deref().unwrap_or("");
+        let pub_at = it.published_at.as_deref().unwrap_or("");
+        let draft = it.draft.unwrap_or(false);
+        let pre = it.prerelease.unwrap_or(false);
         let label = if draft {
             "draft"
         } else if pre {
@@ -272,31 +302,35 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
             "specify exactly one of: TAG (positional) | --id ID | --latest".into(),
         ));
     }
-    let client = ctx.api()?;
-    let v = if args.latest {
-        releases::latest(client, &repo).await?
-    } else if let Some(id) = &args.id {
-        releases::view_by_id(client, &repo, id).await?
-    } else {
-        releases::view_by_tag(client, &repo, args.tag.as_deref().expect("checked above")).await?
+    let rel = {
+        let client = ctx.sdk()?;
+        if args.latest {
+            client.releases().get_latest_release(repo.clone()).await?
+        } else if let Some(id) = &args.id {
+            client.releases().get_release_by_id(repo.clone(), id.clone()).await?
+        } else {
+            let tag = args.tag.as_deref().expect("checked above").to_owned();
+            client.releases().get_release_by_tag(repo.clone(), tag).await?
+        }
     };
+    let v = to_value(&rel)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let tag = v.get("tag_name").and_then(Value::as_str).unwrap_or("");
-    let name = v.get("name").and_then(Value::as_str).unwrap_or("");
-    let body = v.get("body").and_then(Value::as_str).unwrap_or("");
-    let pub_at = v.get("published_at").and_then(Value::as_str).unwrap_or("");
+    let tag = rel.tag_name.as_deref().unwrap_or("");
+    let name = rel.name.as_deref().unwrap_or("");
+    let body = rel.body.as_deref().unwrap_or("");
+    let pub_at = rel.published_at.as_deref().unwrap_or("");
     println!("{tag} — {name}");
     if !pub_at.is_empty() {
         println!("  Published: {pub_at}");
     }
-    if let Some(assets) = v.get("assets").and_then(Value::as_array) {
+    if let Some(assets) = rel.assets.as_ref() {
         if !assets.is_empty() {
             println!("  Assets ({}):", assets.len());
             for a in assets {
-                let n = a.get("name").and_then(Value::as_str).unwrap_or("");
-                let s = a.get("size").and_then(Value::as_i64).unwrap_or(0);
+                let n = a.name.as_deref().unwrap_or("");
+                let s = a.size.unwrap_or(0);
                 println!("    - {n} ({s} bytes)");
             }
         }
@@ -325,8 +359,8 @@ fn read_notes(notes: Option<String>, notes_file: Option<String>) -> Result<Optio
 async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
     let body_text = read_notes(args.notes, args.notes_file)?;
-    let body = releases::CreateReleaseBody {
-        tag_name: args.tag.clone(),
+    let body = PostReleaseForm {
+        tag_name: Some(args.tag.clone()),
         name: args.title,
         body: body_text,
         draft: if args.draft { Some(true) } else { None },
@@ -334,15 +368,17 @@ async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
         make_latest: None,
         target_commitish: args.target,
     };
-    let client = ctx.api()?;
-    let v = releases::create(client, &repo, &body).await?;
-    let id = v.get("id").and_then(Value::as_str).unwrap_or("");
+    let rel = {
+        let client = ctx.sdk()?;
+        client.releases().post_release(repo.clone(), &body).await?
+    };
+    let id = rel.id.as_deref().unwrap_or("");
     eprintln!("✓ Created release `{}` (id={id})", args.tag);
 
     if !args.asset.is_empty() && !id.is_empty() {
-        let client = ctx.api()?;
-        for p in &args.asset {
-            let _ = releases::upload_asset(client, &repo, id, p, false, None).await?;
+        let assets = args.asset.clone();
+        for p in &assets {
+            upload_one(ctx, &repo, id, p, false, None).await?;
             eprintln!("  ↑ uploaded {}", p.display());
         }
     }
@@ -357,15 +393,18 @@ async fn edit(ctx: &mut Context, args: EditArgs) -> Result<(), CliError> {
             "nothing to edit — pass --title/--notes/--notes-file/--draft/--prerelease".into(),
         ));
     }
-    let body = releases::EditReleaseBody {
+    let body = PatchReleaseForm {
         name: args.title,
         body: body_text,
         draft: args.draft,
         prerelease: args.prerelease,
         make_latest: None,
     };
-    let client = ctx.api()?;
-    let _ = releases::edit(client, &repo, &args.id, &body).await?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .releases()
+        .patch_release(repo.clone(), args.id.clone(), &body)
+        .await?;
     eprintln!("✓ Updated release {}", args.id);
     Ok(())
 }
@@ -373,35 +412,165 @@ async fn edit(ctx: &mut Context, args: EditArgs) -> Result<(), CliError> {
 async fn delete(ctx: &mut Context, args: DeleteArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
     ctx.confirm(&format!("Delete release `{}` from `{repo}`? (y/N)", args.id), args.yes)?;
-    let client = ctx.api()?;
-    let _ = releases::delete(client, &repo, &args.id).await?;
+    let client = ctx.sdk()?;
+    let _ = client.releases().delete_release(repo.clone(), args.id.clone()).await?;
     eprintln!("✓ Deleted release {}", args.id);
     Ok(())
 }
 
 async fn upload(ctx: &mut Context, args: UploadArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
-    let client = ctx.api()?;
     for p in &args.files {
-        let _ = releases::upload_asset(client, &repo, &args.id, p, args.clobber, args.ttl).await?;
+        upload_one(ctx, &repo, &args.id, p, args.clobber, args.ttl).await?;
         eprintln!("  ↑ uploaded {}", p.display());
     }
     eprintln!("✓ Uploaded {} file(s) to release {}", args.files.len(), args.id);
     Ok(())
 }
 
+/// Two-phase asset upload.
+///
+/// Phase 1 (POST asset-upload-url) and phase 3 (POST verify_url) both go
+/// through the SDK's shared HTTP layer. Phase 2 (PUT file bytes to the
+/// pre-signed URL) bypasses the SDK because `HttpInner::execute*` only
+/// supports JSON bodies — see SDK-I14. We use a fresh `reqwest::Client`
+/// for that hop, which also matches the legacy `cnb-api` behaviour of
+/// keeping the pre-signed URL's auth out of the Authorization header.
+async fn upload_one(
+    ctx: &mut Context,
+    repo: &str,
+    release_id: &str,
+    path: &std::path::Path,
+    overwrite: bool,
+    ttl_days: Option<u32>,
+) -> Result<(), CliError> {
+    let asset_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| CliError::BadArgs(format!("invalid file path: {path:?}")))?
+        .to_owned();
+    let meta = tokio::fs::metadata(path).await?;
+    let size = meta.len();
+
+    // Phase 1: ask for a pre-signed URL via the typed SDK.
+    let form = PostReleaseAssetUploadUrlForm {
+        asset_name: Some(asset_name.clone()),
+        overwrite: if overwrite { Some(true) } else { None },
+        size: Some(i64::try_from(size).unwrap_or(i64::MAX)),
+        ttl: ttl_days.map(i64::from),
+    };
+    let url_info = {
+        let client = ctx.sdk()?;
+        client
+            .releases()
+            .post_release_asset_upload_url(repo.to_owned(), release_id.to_owned(), &form)
+            .await?
+    };
+    let upload_url = url_info
+        .upload_url
+        .ok_or_else(|| CliError::Generic("server omitted upload_url".into()))?;
+    let verify_url = url_info
+        .verify_url
+        .ok_or_else(|| CliError::Generic("server omitted verify_url".into()))?;
+
+    // Phase 2: stream-PUT the file bytes to the pre-signed URL.
+    // Must use a standalone reqwest client — the SDK's execute path only
+    // accepts JSON bodies (see SDK-I14).
+    let file = File::open(path).await?;
+    let stream = ReaderStream::new(file);
+    let body = reqwest::Body::wrap_stream(stream);
+    let put_resp = reqwest::Client::new()
+        .put(&upload_url)
+        .header(reqwest::header::CONTENT_LENGTH, size)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| CliError::Generic(format!("upload PUT failed: {e}")))?;
+    let put_status = put_resp.status();
+    if !put_status.is_success() {
+        let text = put_resp.text().await.unwrap_or_default();
+        return Err(CliError::Generic(format!("upload PUT {}: {text}", put_status.as_u16())));
+    }
+
+    // Phase 3: confirm. `verify_url` is absolute; hand it to the SDK's
+    // shared `HttpInner::execute` which accepts an arbitrary `Url` and
+    // carries the SDK's retry + auth config for free.
+    let verify_parsed = url::Url::parse(&verify_url)
+        .map_err(|e| CliError::Generic(format!("invalid verify_url `{verify_url}`: {e}")))?;
+    let client = ctx.sdk()?;
+    let _: Value = client.http().execute(reqwest::Method::POST, verify_parsed).await?;
+    Ok(())
+}
+
+/// Download a release asset. The SDK exposes `get_releases_asset` but
+/// decodes the body as JSON, which is wrong for this endpoint (it returns
+/// raw bytes after a 302 to a presigned URL). We therefore use a raw
+/// `reqwest::Client` that follows redirects by default. Base URL
+/// precedence matches the SDK client (env > default). See SDK-I14.
 async fn download(ctx: &mut Context, args: DownloadArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
-    let client = ctx.api()?;
-    let dest = releases::download_asset(client, &repo, &args.tag, &args.filename, &args.output).await?;
+    let dest = download_bytes(&repo, &args.tag, &args.filename, &args.output).await?;
     eprintln!("✓ Downloaded {} → {}", args.filename, dest.display());
     Ok(())
 }
 
+async fn download_bytes(
+    repo: &str,
+    tag: &str,
+    filename: &str,
+    dest_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, CliError> {
+    let mut base = std::env::var("CNB_API_BASE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned());
+    if !base.ends_with('/') {
+        base.push('/');
+    }
+    let base_url =
+        url::Url::parse(&base).map_err(|e| CliError::Generic(format!("invalid SDK base url `{base}`: {e}")))?;
+    let full = base_url
+        .join(&format!("{repo}/-/releases/download/{tag}/{filename}"))
+        .map_err(|e| CliError::Generic(format!("could not build download URL: {e}")))?;
+
+    // Token comes from the env (set by the wiremock harness and by
+    // `cnb auth login` for real runs). A proper fix would reuse the SDK
+    // resolver via `Context::sdk()` + its reqwest pool, but the SDK does
+    // not yet expose the underlying client — see SDK-I14.
+    let token = std::env::var("CNB_TOKEN").unwrap_or_default();
+    let mut req = reqwest::Client::new().get(full);
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CliError::Generic(format!("download GET failed: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(CliError::Generic(format!("download GET {}: {text}", status.as_u16())));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| CliError::Generic(format!("download body: {e}")))?;
+    tokio::fs::create_dir_all(dest_dir).await?;
+    let dest = dest_dir.join(filename);
+    tokio::fs::write(&dest, &bytes).await?;
+    Ok(dest)
+}
+
 async fn asset_view(ctx: &mut Context, args: AssetArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = releases::view_asset(client, &repo, &args.id, &args.asset_id).await?;
+    let asset = {
+        let client = ctx.sdk()?;
+        client
+            .releases()
+            .get_release_asset(repo.clone(), args.id.clone(), args.asset_id.clone())
+            .await?
+    };
+    let v = to_value(&asset)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
@@ -419,8 +588,11 @@ async fn asset_delete(ctx: &mut Context, args: AssetDeleteArgs) -> Result<(), Cl
         ),
         args.yes,
     )?;
-    let client = ctx.api()?;
-    let _ = releases::delete_asset(client, &repo, &args.id, &args.asset_id).await?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .releases()
+        .delete_release_asset(repo.clone(), args.id.clone(), args.asset_id.clone())
+        .await?;
     eprintln!("✓ Deleted asset {}", args.asset_id);
     Ok(())
 }

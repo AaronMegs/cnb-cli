@@ -171,3 +171,69 @@ async fn release_delete_with_yes_succeeds() {
         .assert()
         .success();
 }
+
+#[tokio::test]
+async fn release_download_writes_bytes_to_output_dir() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/feedback/-/releases/download/v1.0.0/hello.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world".as_slice()))
+        .mount(&server)
+        .await;
+
+    let outdir = tempfile::tempdir().unwrap();
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args([
+            "release",
+            "download",
+            "v1.0.0",
+            "hello.txt",
+            "--repo",
+            "cnb/feedback",
+            "--output",
+            outdir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("✓ Downloaded hello.txt"));
+    let content = std::fs::read(outdir.path().join("hello.txt")).unwrap();
+    assert_eq!(content, b"hello world");
+}
+
+#[tokio::test]
+async fn release_asset_view_emits_json_when_flag_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/feedback/-/releases/r-1/assets/a-9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "a-9",
+            "name": "foo.tar.gz",
+            "size": 2048
+        })))
+        .mount(&server)
+        .await;
+    let env = common::TestEnv::new();
+    let assert = env
+        .cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args([
+            "release",
+            "asset-view",
+            "r-1",
+            "a-9",
+            "--repo",
+            "cnb/feedback",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["id"], "a-9");
+    assert_eq!(v["name"], "foo.tar.gz");
+    assert_eq!(v["size"], 2048);
+}
