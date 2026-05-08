@@ -19,9 +19,9 @@ Each entry has:
 
 ---
 
-## Triage summary (2026-05-08, Phase 2 steps 2.1–2.9 complete)
+## Triage summary (2026-05-08, Phase 2 steps 2.1–2.10 complete)
 
-Counts: **16 open, 0 resolved**. Grouped below by how we plan to
+Counts: **18 open, 0 resolved**. Grouped below by how we plan to
 surface them upstream — not by the individual severity tags inside
 each entry, which stay as the original per-port verdict.
 
@@ -68,23 +68,34 @@ group.
 | SDK-I10  | No path-segment validation for user-controlled identifiers                           | Defensive defaults        |
 | SDK-I12  | `set_repo_visibility` uses a query string, not a body — unclear which is canonical   | Spec / server alignment   |
 | SDK-I16  | `UpdateMembersRequest` body shape disagrees with prior facade; spec vs wire unclear  | Spec / server alignment   |
+| SDK-I17  | `GetRepoContributorTrendQuery` omits the `days` filter the server accepts            | Spec / query completeness |
+| SDK-I18  | `pinned-repos` PUT endpoint is not modeled (only the GET half is generated)          | Missing verbs             |
 
 ### Upstream-report rollout plan
 
-1. Land Phase 2 fully (remaining: `cnb api` raw passthrough — may
-   never be portable, and `repo pin`/`contributors` which the SDK
-   does not yet expose).
+1. Land Phase 2 fully. As of step 2.10 the only cnb-api residue is:
+   - `cnb auth login/status` token validation (`users::get_self`)
+     — Phase 1 hold-over, deliberately unchanged to keep the
+     pre-auth HTTP path simple.
+   - `cnb issue` and `cnb pr` **write paths** (create / edit /
+     close / reopen / comment / assignees / labels) — still on
+     `cnb_api::services::{issues,pulls}` pending a step 2.11
+     port. Read paths (view / list) are SDK-backed.
+   - `cnb api` raw passthrough — structurally cannot use the
+     SDK's JSON-only transport (see SDK-I14).
 2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.
 3. File the **Tier B bundle** as one consolidated issue titled
    something like *"DTO completeness & method-signature consistency
    during the cnb-cli port"*, linking to specific commits per sub-case.
-4. File the **Tier C meta-issue** last — list the six sub-items
+4. File the **Tier C meta-issue** last — list the eight sub-items
    with a one-paragraph justification each; no reproducer required.
 5. Offer a patch PR for whatever looks least controversial (I04
    rename, I05 `#[non_exhaustive]`, I06 URL fix are all safe
-   starting points).
+   starting points). SDK-I18 (pinned-repos PUT) is also a clean
+   "add a method" patch if the OpenAPI spec already documents the
+   endpoint.
 
 ---
 
@@ -573,6 +584,48 @@ group.
 - **Severity**: annoyance — not blocking, but it's another "the
   wire disagrees with itself" case that puts the onus on every
   consumer to guess which side the server is on.
+
+### SDK-I17 · `GetRepoContributorTrendQuery` omits the `days` filter
+
+- **Surface**: `cnb::repo_contributor::GetRepoContributorTrendQuery`
+  (supports `limit`, `exclude_external_users`)
+- **Summary**: The server accepts `?days=N` on
+  `GET /{slug}/-/contributor/trend` — the cnb-api facade and the CLI
+  have documented a `--days` flag since M4 launch. The SDK's typed
+  query struct does not expose the field, so a typed-only call
+  cannot reach that filter. The existing `limit` field does a
+  different thing (result count, not time window).
+- **Workaround**: `cnb repo contributors` routes through
+  `Context::sdk_raw_get` with `?days=N` appended when the user
+  passes `--days`. Without `--days`, we still call the typed
+  `get_repo_contributor_trend` path.
+- **Desired fix**: add `days: Option<i64>` (with the corresponding
+  builder method) to `GetRepoContributorTrendQuery`. Confirm the
+  spec mentions `days` — if not, file the missing parameter upstream
+  as a spec gap too.
+- **Severity**: annoyance.
+
+### SDK-I18 · `pinned-repos` PUT endpoint is not modeled
+
+- **Surface**: `cnb::repositories::RepositoriesClient` exposes
+  `get_pinned_repo_by_group` (GET) + `get_pinned_repo_by_id` (GET
+  by user), but **not** the `PUT /{slug}/-/pinned-repos` that
+  replaces the pinned set.
+- **Summary**: The read side is typed, the write side is absent.
+  `cnb repo pin` / `unpin` need both: read the current set,
+  compute the new set, write back. The SDK only has the read half.
+- **Workaround**: the CLI does a typed GET via
+  `get_pinned_repo_by_group` and a raw PUT via
+  `Context::sdk_raw_json(PUT, path, body)`. We added
+  `sdk_raw_json` specifically to unblock this case — it routes
+  through the SDK's `HttpInner::execute_with_body` so the request
+  still shares the SDK's retry / auth / tracing setup.
+- **Desired fix**: generate `set_pinned_repos(slug, body: &SetPinnedRepos)`
+  from the OpenAPI spec. Body shape: `{repos: Vec<String>}`.
+  Returns `serde_json::Value` (or a typed ack DTO if the server
+  spec exposes one).
+- **Severity**: annoyance — the raw-PUT workaround is reusable
+  for any SDK endpoint that models only a subset of verbs.
 
 ---
 

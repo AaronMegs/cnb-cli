@@ -172,6 +172,36 @@ impl Context {
         Ok(v)
     }
 
+    /// Low-level JSON-body request (`PUT` / `POST` / `PATCH`) returning
+    /// `serde_json::Value`, routed through the SDK's HTTP layer. Useful
+    /// for endpoints the SDK exposes only as a GET (e.g. `pinned-repos`,
+    /// which the SDK types for `GET` but leaves the `PUT` counterpart
+    /// unmodelled).
+    ///
+    /// Prefer the typed `client.<resource>().<op>(body)` call wherever
+    /// the SDK has it — this helper exists to unblock consumers until
+    /// the SDK grows the missing verbs.
+    pub async fn sdk_raw_json(
+        &mut self,
+        method: reqwest::Method,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CliError> {
+        let base = self.effective_sdk_base_url();
+        let mut base_with_slash = base;
+        if !base_with_slash.ends_with('/') {
+            base_with_slash.push('/');
+        }
+        let base_url = url::Url::parse(&base_with_slash)
+            .map_err(|e| CliError::Generic(format!("invalid SDK base url `{base_with_slash}`: {e}")))?;
+        let full = base_url
+            .join(path.trim_start_matches('/'))
+            .map_err(|e| CliError::Generic(format!("could not join path `{path}` onto base: {e}")))?;
+        let client = self.sdk()?;
+        let v: serde_json::Value = client.http().execute_with_body(method, full, body).await?;
+        Ok(v)
+    }
+
     /// Resolve the repository slug to operate on (M2 §8.2 contract).
     ///
     /// Resolution order:

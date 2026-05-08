@@ -7,6 +7,77 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.10)
+
+- **`cnb repo pin` / `unpin` / `list-pinned` / `contributors`
+  ported to the typed SDK** — the four M4 verbs that previously
+  routed through the `cnb-api::services::repo_extras` facade.
+  - `list-pinned` → `RepositoriesClient::get_pinned_repo_by_group`
+    returning `Vec<Repos4UserBase>`.
+  - `pin` / `unpin` → typed GET to read the current set + raw PUT
+    via the new `Context::sdk_raw_json(PUT, path, body)` helper
+    because the SDK does not model the `PUT /{slug}/-/pinned-repos`
+    counterpart. New SDK issue SDK-I18.
+  - `contributors` → typed `RepoContributorClient::get_repo_contributor_trend`
+    when no `--days` is passed; routes through `Context::sdk_raw_get`
+    with `?days=N` otherwise because the SDK's
+    `GetRepoContributorTrendQuery` does not expose a `days` filter
+    (the field the server accepts and the CLI has exposed since M4
+    launch). New SDK issue SDK-I17.
+
+### Added — new helper on `Context`
+
+- `Context::sdk_raw_json(method, path, body)` — minimum-fuss escape
+  hatch for endpoints the SDK models only as GET, or for verbs the
+  typed query / body struct cannot fully express. Routes through
+  `HttpInner::execute_with_body` so the request still shares the
+  SDK's retry / auth / tracing setup. First consumer: `cnb repo pin`.
+
+### cnb-api surface reduction
+
+- The `cnb-api::services::repo_extras` module is no longer used by
+  any CLI command. The facade is still compiled (its wiremock unit
+  tests live alongside the other `cnb-api` services), but it's
+  slated for removal in the cnb-api cleanup pass once the issue /
+  pr write paths also move off.
+
+### Corrected — Phase 2 scope claim
+
+- The step 2.9 CHANGELOG entry described Phase 2 as "functionally
+  complete"; that was over-claiming. The **write paths** of
+  `cnb issue` (create / edit / close / reopen / comment / assignees /
+  labels) and `cnb pr` (create / edit / close / reopen / comment /
+  files / commits / view / assignees / labels) are still on the
+  cnb-api facade. Those are scoped into step 2.11. Listing the
+  three real residue buckets (auth login validation, issue/pr
+  writes, raw api passthrough) is now in `docs/sdk-issues.md` and
+  the README milestone row.
+
+### Test additions
+
+5 new wiremock integration tests appended to `m2_repo`:
+
+- `repo_list_pinned_renders_path_and_description` — typed
+  `Vec<Repos4UserBase>` → TSV render.
+- `repo_pin_adds_to_existing_set_via_put` — asserts the
+  GET-then-PUT flow and that the PUT body is the BTreeSet-sorted
+  `{repos: [...]}` shape.
+- `repo_unpin_removes_from_existing_set` — inverse of above.
+- `repo_contributors_typed_call_without_days` — typed path.
+- `repo_contributors_raw_passthrough_with_days` — asserts the
+  `?days=30` query string is forwarded via `sdk_raw_get`.
+
+Total project test count: 233 → **238**.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I17** (new, Tier C): `GetRepoContributorTrendQuery`
+  omits `days`; the CLI has always exposed `--days` and forwards
+  it via `sdk_raw_get` as a workaround.
+- **SDK-I18** (new, Tier C): `pinned-repos` PUT is not generated
+  from the spec; only the GET halves exist. Workaround is the new
+  `Context::sdk_raw_json` helper.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.9)
 
 - **`cnb mission` — all 6 subcommands ported to the typed SDK**

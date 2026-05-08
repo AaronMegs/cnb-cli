@@ -340,3 +340,151 @@ async fn repo_fork_unwraps_listforks_envelope() {
     assert!(lines[0].contains("alice/feedback-fork"));
     assert!(lines[1].contains("bob/feedback-fork"));
 }
+
+// ============================================================================
+// Phase 2 step 2.10 — pin / unpin / list-pinned / contributors
+// ============================================================================
+
+#[tokio::test]
+async fn repo_list_pinned_renders_path_and_description() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/-/pinned-repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"path": "cnb/feedback", "description": "Feedback repo"},
+            {"path": "cnb/docs",     "description": ""}
+        ])))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    let assert = env
+        .cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["repo", "list-pinned", "cnb"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "cnb/feedback\tFeedback repo");
+    assert_eq!(lines[1], "cnb/docs\t");
+}
+
+#[tokio::test]
+async fn repo_pin_adds_to_existing_set_via_put() {
+    // `pin` first does a GET of the current set, then PUTs the merged
+    // set back. Wiremock mounts both mocks; the CLI reads via SDK and
+    // writes via `Context::sdk_raw_json` because the SDK does not model
+    // the PUT endpoint (SDK-I18).
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/-/pinned-repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"path": "cnb/feedback", "description": "Existing"}
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/cnb/-/pinned-repos"))
+        // Keys BTreeSet-sorted, so the expected order is stable:
+        // cnb/docs < cnb/feedback lexicographically.
+        .and(body_partial_json(json!({"repos": ["cnb/docs", "cnb/feedback"]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["repo", "pin", "cnb", "cnb/docs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("✓ cnb pinned set updated (2 entries)"));
+}
+
+#[tokio::test]
+async fn repo_unpin_removes_from_existing_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/-/pinned-repos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"path": "cnb/feedback"},
+            {"path": "cnb/docs"}
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/cnb/-/pinned-repos"))
+        .and(body_partial_json(json!({"repos": ["cnb/feedback"]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    env.cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["repo", "unpin", "cnb", "cnb/docs"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("✓ cnb pinned set updated (1 entries)"));
+}
+
+#[tokio::test]
+async fn repo_contributors_typed_call_without_days() {
+    // Without --days, CLI calls the typed
+    // `RepoContributorClient::get_repo_contributor_trend` path.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/feedback/-/contributor/trend"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_total": 3,
+            "week_total": 4
+        })))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    let assert = env
+        .cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["repo", "contributors", "cnb/feedback"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["user_total"], 3);
+    assert_eq!(v["week_total"], 4);
+}
+
+#[tokio::test]
+async fn repo_contributors_raw_passthrough_with_days() {
+    // With --days, CLI routes through `Context::sdk_raw_get` so the
+    // query string is forwarded verbatim — the SDK's typed query
+    // struct does not expose `days`. See SDK-I17.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cnb/feedback/-/contributor/trend"))
+        .and(wiremock::matchers::query_param("days", "30"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user_total": 7
+        })))
+        .mount(&server)
+        .await;
+
+    let env = common::TestEnv::new();
+    let assert = env
+        .cmd()
+        .env("CNB_TOKEN", "fake")
+        .env("CNB_API_BASE", server.uri())
+        .args(["repo", "contributors", "cnb/feedback", "--days", "30"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["user_total"], 7);
+}
