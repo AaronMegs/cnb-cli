@@ -19,6 +19,72 @@ Each entry has:
 
 ---
 
+## Triage summary (2026-05-08, Phase 2 steps 2.1–2.7 complete)
+
+Counts: **14 open, 0 resolved**. Grouped below by how we plan to
+surface them upstream — not by the individual severity tags inside
+each entry, which stay as the original per-port verdict.
+
+### Tier A · file as standalone issues before Phase 2 ends
+
+These are the cases where every single consumer has to reinvent the
+same workaround *and* where the workaround loses a real SDK feature
+(typed access, connection-pool reuse, auth forwarding). They deserve
+their own upstream issues with a minimal repro, not a summary bullet.
+
+| Id       | One-line pitch                                                                 | Why tier A                                                                      |
+|----------|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| SDK-I03  | `Visibility` alias does not accept integer-form responses                      | Blocks typed deserialisation on any server still emitting `0/10/20`.            |
+| SDK-I09  | `Pull.{head,base}` typed as `Option<Value>` — every UI reinvents `read_branch` | ~50% of MR tooling code is branch-name extraction; the SDK could own it.       |
+| SDK-I14  | No non-JSON transport — bytes endpoints need a side-car `reqwest::Client`      | Forces two HTTP clients per `release upload` / `download`; duplicates auth.     |
+| SDK-I07  | Issue vs pull number typing disagrees across methods (`i64` vs `String`)       | Contagious — every downstream type definition has to pick a side and stick.    |
+
+### Tier B · file together as a "generated-DTO polish" bundle
+
+Small, related DTO / method-signature nits that a single upstream
+patch can clean up. None block compilation, but together they cost the
+consumer non-trivial boilerplate.
+
+| Id       | One-line pitch                                                                  | Proposed grouping         |
+|----------|---------------------------------------------------------------------------------|---------------------------|
+| SDK-I02  | `Repos4User` DTO omits `default_branch` (and likely other server-side fields)   | DTO completeness          |
+| SDK-I08  | Same resource, two DTOs (`Pull` vs `PullRequest`) — share rendering is painful  | DTO completeness          |
+| SDK-I11  | `RepoPatch` cannot express `name` / `default_branch` — prior facade was lying   | DTO completeness          |
+| SDK-I13  | `list_forks_repos` returns `ListForks { forks: Option<Vec<_>> }` instead of vec | Signature consistency     |
+| SDK-I01  | `HttpInner::url()` + `base_url` are `pub(crate)` — no clean escape hatch        | Method visibility         |
+
+### Tier C · batch into a single "polish / conventions" ticket
+
+Housekeeping. Each one alone doesn't warrant a ticket, but one
+well-written meta-issue covering them lets the maintainer triage as a
+group.
+
+| Id       | One-line pitch                                                                       | Subgroup                 |
+|----------|--------------------------------------------------------------------------------------|--------------------------|
+| SDK-I04  | Crate name `cnb` collides with any binary also named `cnb`                           | Publishing metadata       |
+| SDK-I05  | Query structs lack `#[non_exhaustive]`; direct-init becomes a SemVer hazard          | Generated-code conventions |
+| SDK-I06  | `repository` URL in crate metadata 404s on unauthenticated visit                     | Publishing metadata       |
+| SDK-I10  | No path-segment validation for user-controlled identifiers                           | Defensive defaults        |
+| SDK-I12  | `set_repo_visibility` uses a query string, not a body — unclear which is canonical   | Spec / server alignment   |
+
+### Upstream-report rollout plan
+
+1. Land Phase 2 fully (steps 2.8 — `build`/`workspace`, 2.9 —
+   `registry`/`mission`/`org` or wherever the reality lands).
+2. File the **four Tier A issues** first — one each, with a minimal
+   reproducible code sample pulled straight from `cnb-cli` git
+   history. They stand on their own and have the clearest upstream ask.
+3. File the **Tier B bundle** as one consolidated issue titled
+   something like *"DTO completeness & method-signature consistency
+   during the cnb-cli port"*, linking to specific commits per sub-case.
+4. File the **Tier C meta-issue** last — list the five sub-items
+   with a one-paragraph justification each; no reproducer required.
+5. Offer a patch PR for whatever looks least controversial (I04
+   rename, I05 `#[non_exhaustive]`, I06 URL fix are all safe
+   starting points).
+
+---
+
 ## Active issues (v0.2.1, 2026-05-07)
 
 ### SDK-I01 · `HttpInner::url()` and `base_url` are `pub(crate)`
