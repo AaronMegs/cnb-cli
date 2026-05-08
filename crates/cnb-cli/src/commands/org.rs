@@ -1,7 +1,34 @@
 //! `cnb org` — organizations & members (M4 §8.10, 7 subcommands incl. follower).
+//!
+//! Phase 2, step 2.9 of the cnb-api → typed SDK migration. The verbs
+//! route through three different SDK resource clients:
+//!
+//! | subcommand              | SDK client                  |
+//! |-------------------------|-----------------------------|
+//! | `list`                  | `OrganizationsClient::list_top_groups` |
+//! | `view`                  | `OrganizationsClient::get_group`       |
+//! | `member list`           | `MembersClient::list_members_of_group` |
+//! | `member add`            | `MembersClient::add_members_of_group`  |
+//! | `member edit`           | `MembersClient::update_members_of_group` |
+//! | `member remove`         | `MembersClient::delete_members_of_group` |
+//! | `follower` / `following`| `FollowersClient::get_followers_by_user_id` / `get_following_by_user_id` |
+//!
+//! The `--user` fallback for `follower`/`following` queries the
+//! current user via `UsersClient::get_user_info` (GET /user) →
+//! `UsersResult.username`.
+//!
+//! **Body-shape change, member add/edit** (→ SDK-I16): the SDK's
+//! `UpdateMembersRequest` carries `{access_level, is_outside_collaborator}`
+//! rather than the `{username, role}` that the cnb-api facade used.
+//! We forward the CLI's `--role` value verbatim into `access_level`.
+//! If a real server rejects this shape, the ticket gets bumped to
+//! blocker and we fall back to raw HTTP.
 
 use clap::{Args, Subcommand};
-use cnb_api::services::orgs;
+use cnb_sdk::followers::{GetFollowersByUserIDQuery, GetFollowingByUserIDQuery};
+use cnb_sdk::members::ListMembersOfGroupQuery;
+use cnb_sdk::models::UpdateMembersRequest;
+use cnb_sdk::organizations::ListTopGroupsQuery;
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -153,23 +180,47 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
     Ok(false)
 }
 
+fn to_value<T: serde::Serialize>(t: &T) -> Result<Value, CliError> {
+    serde_json::to_value(t).map_err(|e| CliError::Generic(format!("serialise response: {e}")))
+}
+
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    let q = format!("page=1&page_size={}", args.limit.max(1));
-    let client = ctx.api()?;
-    let items = orgs::list(client, &q).await?;
-    let v = Value::Array(items.clone());
+    let q = ListTopGroupsQuery::new()
+        .page(1_i64)
+        .page_size(i64::from(args.limit.max(1)));
+    let items = {
+        let client = ctx.sdk()?;
+        client.organizations().list_top_groups(&q).await?
+    };
+    let v = Value::Array(items.iter().map(to_value).collect::<Result<Vec<_>, _>>()?);
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
+    // `OrganizationAccess` has no `slug` field — the server uses
+    // `path` for the slug-like identifier. Same pattern as
+    // `Repos4User.path` we rely on elsewhere.
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let slug = it.get("slug").and_then(Value::as_str).unwrap_or("");
-        let name = it.get("name").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![slug.to_owned(), name.to_owned()]);
+        let slug = v_get_str(&to_value(it)?, "path")
+            .or_else(|| v_get_str(&to_value(it).unwrap_or(Value::Null), "slug"))
+            .unwrap_or_default();
+        let name = it_name(it).unwrap_or_default();
+        rows.push(vec![slug, name]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(&mut stdout, &["SLUG", "NAME"], &rows, ctx.io.stdout_is_tty)?;
     Ok(())
+}
+
+fn v_get_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key).and_then(Value::as_str).map(|s| s.to_owned())
+}
+
+/// `OrganizationAccess` does not expose `name` as a typed `Option<String>`
+/// (it's inside a broader struct with flattened custom fields). We
+/// fall back to `Value::get("name")` for a stable lookup.
+fn it_name(access: &cnb_sdk::models::OrganizationAccess) -> Option<String> {
+    to_value(access).ok().and_then(|v| v_get_str(&v, "name"))
 }
 
 async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
@@ -179,13 +230,16 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
         let _ = open::that(&url);
         return Ok(());
     }
-    let client = ctx.api()?;
-    let v = orgs::view(client, &args.group).await?;
+    let org = {
+        let client = ctx.sdk()?;
+        client.organizations().get_group(args.group.clone()).await?
+    };
+    let v = to_value(&org)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let name = v.get("name").and_then(Value::as_str).unwrap_or(&args.group);
-    let desc = v.get("description").and_then(Value::as_str).unwrap_or("");
+    let name = v_get_str(&v, "name").unwrap_or_else(|| args.group.clone());
+    let desc = v_get_str(&v, "description").unwrap_or_default();
     println!("{name}");
     if !desc.is_empty() {
         println!("  {desc}");
@@ -194,22 +248,31 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
 }
 
 async fn member_list(ctx: &mut Context, args: MemberListArgs) -> Result<(), CliError> {
-    use std::fmt::Write;
-    let mut q = format!("page=1&page_size={}", args.limit.max(1));
-    if let Some(r) = &args.role {
-        write!(&mut q, "&role={r}").expect("write to String");
+    let mut q = ListMembersOfGroupQuery::new()
+        .page(1_i64)
+        .page_size(i64::from(args.limit.max(1)));
+    if let Some(r) = args.role {
+        q = q.role(r);
     }
-    let client = ctx.api()?;
-    let items = orgs::list_members(client, &args.group, &q).await?;
-    let v = Value::Array(items.clone());
+    let items = {
+        let client = ctx.sdk()?;
+        client.members().list_members_of_group(args.group.clone(), &q).await?
+    };
+    let v = Value::Array(items.iter().map(to_value).collect::<Result<Vec<_>, _>>()?);
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let user = it.get("username").and_then(Value::as_str).unwrap_or("");
-        let role = it.get("role").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![user.to_owned(), role.to_owned()]);
+        let user = it.username.as_deref().unwrap_or("").to_owned();
+        // Typed SDK DTO uses `access_level: Option<String>` (via the
+        // `AccessRole = String` alias). The previous cnb-api facade
+        // read `role` from the wire; that key is gone after the port.
+        // Servers that still only emit `role` (not `access_level`)
+        // will render an empty column here — intentional, matching
+        // every other "typed-first" port in Phase 2.
+        let role = it.access_level.clone().unwrap_or_default();
+        rows.push(vec![user, role]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(&mut stdout, &["USER", "ROLE"], &rows, ctx.io.stdout_is_tty)?;
@@ -217,8 +280,15 @@ async fn member_list(ctx: &mut Context, args: MemberListArgs) -> Result<(), CliE
 }
 
 async fn member_add(ctx: &mut Context, args: MemberAddArgs) -> Result<(), CliError> {
-    let client = ctx.api()?;
-    let _ = orgs::add_member(client, &args.group, &args.username, &args.role).await?;
+    let body = UpdateMembersRequest {
+        access_level: Some(args.role.clone()),
+        is_outside_collaborator: None,
+    };
+    let client = ctx.sdk()?;
+    let _ = client
+        .members()
+        .add_members_of_group(args.group.clone(), args.username.clone(), &body)
+        .await?;
     eprintln!("✓ Added {} to {} as {}", args.username, args.group, args.role);
     Ok(())
 }
@@ -228,15 +298,25 @@ async fn member_remove(ctx: &mut Context, args: MemberRemoveArgs) -> Result<(), 
         &format!("Remove `{}` from `{}`? (y/N)", args.username, args.group),
         args.yes,
     )?;
-    let client = ctx.api()?;
-    let _ = orgs::remove_member(client, &args.group, &args.username).await?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .members()
+        .delete_members_of_group(args.group.clone(), args.username.clone())
+        .await?;
     eprintln!("✓ Removed {} from {}", args.username, args.group);
     Ok(())
 }
 
 async fn member_edit(ctx: &mut Context, args: MemberEditArgs) -> Result<(), CliError> {
-    let client = ctx.api()?;
-    let _ = orgs::edit_member(client, &args.group, &args.username, &args.role).await?;
+    let body = UpdateMembersRequest {
+        access_level: Some(args.role.clone()),
+        is_outside_collaborator: None,
+    };
+    let client = ctx.sdk()?;
+    let _ = client
+        .members()
+        .update_members_of_group(args.group.clone(), args.username.clone(), &body)
+        .await?;
     eprintln!("✓ {} in {} → role {}", args.username, args.group, args.role);
     Ok(())
 }
@@ -245,28 +325,40 @@ async fn follower(ctx: &mut Context, args: UserListArgs, following_mode: bool) -
     let user = match args.user {
         Some(u) => u,
         None => {
-            // Probe `/user` for current username.
-            let client = ctx.api()?;
-            let me = cnb_api::services::users::get_self(client).await?;
+            // Resolve the current user via `users::get_user_info`
+            // (GET /user → UsersResult). Fall back to an error if
+            // the SDK returns a body without `username`.
+            let me = {
+                let client = ctx.sdk()?;
+                client.users().get_user_info().await?
+            };
             me.username
+                .ok_or_else(|| CliError::Generic("server did not return a username for the current user".into()))?
         }
     };
-    let q = format!("page=1&page_size={}", args.limit.max(1));
-    let client = ctx.api()?;
-    let items = if following_mode {
-        orgs::following(client, &user, &q).await?
-    } else {
-        orgs::followers(client, &user, &q).await?
+
+    let page = 1_i64;
+    let page_size = i64::from(args.limit.max(1));
+    let items = {
+        let client = ctx.sdk()?;
+        if following_mode {
+            let q = GetFollowingByUserIDQuery::new().page(page).page_size(page_size);
+            client.followers().get_following_by_user_id(user.clone(), &q).await?
+        } else {
+            let q = GetFollowersByUserIDQuery::new().page(page).page_size(page_size);
+            client.followers().get_followers_by_user_id(user.clone(), &q).await?
+        }
     };
-    let v = Value::Array(items.clone());
+
+    let v = Value::Array(items.iter().map(to_value).collect::<Result<Vec<_>, _>>()?);
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let username = it.get("username").and_then(Value::as_str).unwrap_or("");
-        let nickname = it.get("nickname").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![username.to_owned(), nickname.to_owned()]);
+        let username = it.username.as_deref().unwrap_or("").to_owned();
+        let nickname = it.nickname.as_deref().unwrap_or("").to_owned();
+        rows.push(vec![username, nickname]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(&mut stdout, &["USER", "NICKNAME"], &rows, ctx.io.stdout_is_tty)?;

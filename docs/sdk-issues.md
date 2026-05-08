@@ -19,9 +19,9 @@ Each entry has:
 
 ---
 
-## Triage summary (2026-05-08, Phase 2 steps 2.1–2.7 complete)
+## Triage summary (2026-05-08, Phase 2 steps 2.1–2.9 complete)
 
-Counts: **14 open, 0 resolved**. Grouped below by how we plan to
+Counts: **16 open, 0 resolved**. Grouped below by how we plan to
 surface them upstream — not by the individual severity tags inside
 each entry, which stay as the original per-port verdict.
 
@@ -38,6 +38,7 @@ their own upstream issues with a minimal repro, not a summary bullet.
 | SDK-I09  | `Pull.{head,base}` typed as `Option<Value>` — every UI reinvents `read_branch` | ~50% of MR tooling code is branch-name extraction; the SDK could own it.       |
 | SDK-I14  | No non-JSON transport — bytes endpoints need a side-car `reqwest::Client`      | Forces two HTTP clients per `release upload` / `release download` / `build logs`; duplicates auth. |
 | SDK-I07  | Issue vs pull number typing disagrees across methods (`i64` vs `String`)       | Contagious — every downstream type definition has to pick a side and stick.    |
+| SDK-I15  | `list_package_tags` returns single-object `Tag` instead of `Vec<TagSummary>`   | Typed path is unusable — registry UIs must bypass the SDK to render tag lists. |
 
 ### Tier B · file together as a "generated-DTO polish" bundle
 
@@ -66,18 +67,20 @@ group.
 | SDK-I06  | `repository` URL in crate metadata 404s on unauthenticated visit                     | Publishing metadata       |
 | SDK-I10  | No path-segment validation for user-controlled identifiers                           | Defensive defaults        |
 | SDK-I12  | `set_repo_visibility` uses a query string, not a body — unclear which is canonical   | Spec / server alignment   |
+| SDK-I16  | `UpdateMembersRequest` body shape disagrees with prior facade; spec vs wire unclear  | Spec / server alignment   |
 
 ### Upstream-report rollout plan
 
-1. Land Phase 2 fully (steps 2.8 — `build`/`workspace`, 2.9 —
-   `registry`/`mission`/`org` or wherever the reality lands).
-2. File the **four Tier A issues** first — one each, with a minimal
+1. Land Phase 2 fully (remaining: `cnb api` raw passthrough — may
+   never be portable, and `repo pin`/`contributors` which the SDK
+   does not yet expose).
+2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.
 3. File the **Tier B bundle** as one consolidated issue titled
    something like *"DTO completeness & method-signature consistency
    during the cnb-cli port"*, linking to specific commits per sub-case.
-4. File the **Tier C meta-issue** last — list the five sub-items
+4. File the **Tier C meta-issue** last — list the six sub-items
    with a one-paragraph justification each; no reproducer required.
 5. Offer a patch PR for whatever looks least controversial (I04
    rename, I05 `#[non_exhaustive]`, I06 URL fix are all safe
@@ -509,6 +512,67 @@ group.
   invocation. Three unrelated verbs share the same workaround,
   which makes the case for a generic fix stronger than any one of
   them alone.
+
+### SDK-I15 · `list_package_tags` returns a single `Tag`, not `Vec<T>`
+
+- **Surface**: `cnb::registries::RegistriesClient::list_package_tags`
+  returning `cnb::models::Tag` (singular)
+- **Summary**: The endpoint
+  `GET /{slug}/-/packages/{type}/{name}/-/tags` emits an **array** of
+  tag summaries (each with `name`, `updated_at`, etc.). But the SDK
+  types it as returning `crate::models::Tag` — a single-object DTO
+  that models a **git tag object**
+  (`{commit, name, target, target_type, verification}`), which has
+  nothing to do with registry package tags. The deserialisation
+  will either fail (array → struct) or, if the server ever wraps
+  the response in an object with a `name` field, silently pick up
+  only that one field.
+
+  This is the *second* SDK DTO that a CLI consumer cannot trust
+  as-is, alongside SDK-I02 (`Repos4User` omits `default_branch`).
+- **Workaround**: `cnb registry tag list` issues the typed call
+  first (response discarded via `unwrap_or_default()` to exercise
+  the SDK's request path — auth, base URL, retries, tracing) and
+  then re-reads the endpoint via `Context::sdk_raw_get` to obtain
+  the real array payload. The raw value is rendered through the
+  normal `--json / --jq / --template / table` pipeline.
+- **Desired fix**: rename the DTO or introduce a dedicated
+  `RegistryPackageTag` / `RegistryPackageTagListItem` model and
+  retype `list_package_tags` to return `Vec<…>`. The git-tag `Tag`
+  DTO should stay on `git::GitClient` where it belongs.
+- **Severity**: blocker for the typed path — every consumer of
+  `list_package_tags` has to bypass the SDK's typed surface.
+
+### SDK-I16 · `UpdateMembersRequest` body shape ≠ prior cnb-api facade shape
+
+- **Surface**: `cnb::models::UpdateMembersRequest` used by
+  `MembersClient::{add_members_of_group, update_members_of_group,
+  add_members_of_repo, update_members_of_repo, ...}`
+- **Summary**: The typed body for member add / edit is
+  `{access_level: Option<String>, is_outside_collaborator: Option<bool>}`.
+  The hand-written `cnb-api::services::orgs::AddMemberBody` /
+  `EditMemberBody` we were replacing sent `{username, role}` on the
+  POST and `{role}` on the PUT. The SDK's field name (`access_level`)
+  also diverges from the one the CLI facade used to read from the
+  response (`role`), so the display side had to be re-taught too.
+  Similar to SDK-I12 (set-visibility), we have no integration
+  evidence telling us which of the two representations the real
+  server accepts today; we go with the SDK since it tracks the
+  OpenAPI spec.
+- **Workaround**: the CLI's `org member add/edit` forward
+  `--role <value>` into `UpdateMembersRequest.access_level` verbatim
+  and leave `is_outside_collaborator` as `None`. `member list`
+  reads the typed `access_level` field directly — the legacy `role`
+  key tolerance that the cnb-api facade had is gone.
+- **Desired fix**: confirm the server's canonical body shape.
+  Either:
+  1. Document `access_level` as canonical and deprecate the
+     `role` key on responses, or
+  2. Add an `#[serde(alias = "role")]` on `access_level` so the
+     SDK stays tolerant of servers still emitting the legacy key.
+- **Severity**: annoyance — not blocking, but it's another "the
+  wire disagrees with itself" case that puts the onus on every
+  consumer to guess which side the server is on.
 
 ---
 

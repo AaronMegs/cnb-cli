@@ -7,6 +7,96 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.9)
+
+- **`cnb mission` — all 6 subcommands ported to the typed SDK**
+  (`cnb_sdk::missions::MissionsClient`). Covers `delete` /
+  `view-list` / `view-edit` / `view-sort` / `view-get` / `view-set`.
+  `view-edit` and `view-set` now parse the user-supplied JSON
+  config file into `MissionView` / `MissionViewConfig` before
+  handing it to the SDK — malformed payloads surface as a CLI
+  `BadArgs` (exit 3) instead of getting round-tripped to the server.
+- **`cnb registry` — all 10 verbs ported to the typed SDK**
+  (`cnb_sdk::registries::RegistriesClient`). Covers `list` /
+  `delete` / `set-visibility` / `package {list,view,delete}` /
+  `tag {list,view,delete,provenance}`. The shape of the
+  `set-visibility` request changes from a JSON body
+  `{visibility_level: 0|10|20}` to the query string
+  `?visibility=public|internal|private` — same story as
+  `repo set-visibility` (SDK-I12). The integer-level translation is
+  deleted from the CLI; forward the string verbatim.
+  - `registry tag list` uses the raw HTTP path via
+    `Context::sdk_raw_get` because the SDK's typed
+    `list_package_tags` returns a single-object `models::Tag`
+    DTO (the git-tag shape), which cannot deserialise the array
+    the server actually emits. New SDK issue SDK-I15.
+- **`cnb org` — all 7 subcommands ported** across three SDK
+  resource clients (`organizations`, `members`, `followers`) plus
+  `users::get_user_info` for the `--user` fallback. Covers
+  `list` / `view` / `member {list,add,remove,edit}` /
+  `follower` / `following`.
+  - `org list` now reads the slug from `OrganizationAccess.path`
+    rather than a fictitious `slug` field.
+  - `org member add/edit` now sends the typed
+    `UpdateMembersRequest { access_level, is_outside_collaborator }`
+    body. The previous cnb-api facade sent `{username, role}` /
+    `{role}` — a divergent wire shape. New SDK issue SDK-I16.
+  - `org member list` commits to the typed `access_level` field;
+    legacy `role` key tolerance on the response side is deliberately
+    dropped (matches every other typed-first port in Phase 2).
+  - `org follower` / `following` (no explicit user) now probe
+    `users().get_user_info()` → `UsersResult.username` for the
+    current user. Stays independent of the `auth login` flow which
+    still runs `cnb_api::services::users::get_self` during token
+    validation (Phase 1 residue).
+
+### Milestone marker
+
+- **Phase 2 functionally complete** for every command the SDK
+  covers: `repo` (10/14), `issue`, `pr`, `label`, `release`,
+  `build`, `workspace`, `registry`, `mission`, `org`, `search`.
+  The cnb-api facade is now only used by:
+  - `cnb auth login/logout/status` (Phase 1 token validation via
+    `users::get_self`).
+  - `cnb api` raw passthrough (structurally cannot use the SDK's
+    JSON-only transport — see SDK-I14).
+  - `cnb repo pin/unpin/list-pinned/contributors` (SDK does not
+    expose those endpoints yet).
+
+### Test additions
+
+17 new wiremock integration tests in `m4_registry_mission_org`:
+
+- Registry: list / set-visibility (query-string path) /
+  set-visibility (invalid value rejection) / package list with
+  `--type` filter / package view JSON round-trip through the
+  typed `CommonRegistryPackageDetail` / tag list via the
+  raw-passthrough workaround.
+- Mission: delete (`--yes`) / view-sort posting `{ids:[…]}` /
+  view-edit rejecting malformed JSON before any HTTP call /
+  view-list emitting the typed array.
+- Org: list reading slug from `path` / view card /
+  member add posting `access_level` / member edit putting
+  `access_level` / member list rendering typed `access_level` /
+  follower fallback to `/user` then `/users/{me}/followers` /
+  following with explicit `--user`.
+
+Total project test count: 217 → **233** (the test suite from
+step 2.8 grew 210→217; step 2.9 adds 17 more, for 233 overall).
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I15** (new, Tier A): `list_package_tags` returns a
+  single-object git-tag DTO where the server emits an array.
+  Typed path is unusable — downstream has to bypass the SDK to
+  render tag lists. `cnb registry tag list` uses `sdk_raw_get`
+  as the workaround.
+- **SDK-I16** (new, Tier C): `UpdateMembersRequest` body shape
+  (`access_level` / `is_outside_collaborator`) diverges from the
+  prior cnb-api facade shape (`username` / `role`). Going with the
+  SDK on the assumption it tracks the OpenAPI spec. Integration
+  evidence against a real cnb.cool server is pending.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.8)
 
 - **`cnb build` — all 8 subcommands ported to the typed SDK**
