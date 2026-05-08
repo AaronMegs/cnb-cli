@@ -7,6 +7,69 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.6)
+
+- `cnb repo` write paths — `create`, `edit`, `delete`, `archive`,
+  `unarchive`, `transfer`, `set-visibility`, `fork` (list forks) —
+  now all route through `cnb_sdk::repositories::RepositoriesClient`.
+  Combined with the read paths from step 2.1, **the entire
+  first-party `cnb repo` surface is on the SDK** (10/14 verbs).
+  Pin / unpin / list-pinned / contributors stay on the cnb-api
+  `repo_extras` facade until the SDK exposes those endpoints.
+
+### Changed — surface gaps now made explicit
+
+- `cnb repo create --default-branch` is rejected with `BadArgs`
+  (exit 3). The SDK's `CreateRepoReq` does not include a default-
+  branch field; the cnb-api facade silently dropped it before. We
+  surface the gap rather than pretending. See SDK-I11.
+- `cnb repo edit --name <RENAME>` and `--default-branch` are
+  similarly rejected. The SDK's `RepoPatch` body only carries
+  `description / license / site / topics`. Only `--description`
+  is currently honoured by the PATCH `/{repo}` endpoint.
+- `cnb repo set-visibility` now sends `?visibility=…` as a **query
+  parameter** (the SDK shape, tracking the OpenAPI spec) instead of
+  a `{visibility_level: 0|10|20}` body. If a real cnb.cool server
+  rejects the new shape, the issue is logged as SDK-I12 and we'll
+  fall back via raw HTTP.
+- `cnb repo fork` unwraps the SDK's `ListForks { fork_tree_count,
+  forks: Option<Vec<Forks>> }` envelope so `--json` output stays a
+  bare array, matching `gh repo fork`'s shape and the previous
+  cnb-api facade's behaviour. See SDK-I13.
+
+### Test additions
+
+8 new wiremock integration tests in `m2_repo` covering:
+`repo create` (body shape + `--default-branch` rejection),
+`repo edit --description` (single-field PATCH + `--name`
+rejection), `repo archive` / `unarchive`, `repo transfer --yes`
+(verifies `target` in body, `source` omitted), `repo set-visibility`
+(verifies query-string shape, NOT body), `repo fork` (verifies the
+`ListForks` envelope is unwrapped to a plain array). Total project
+test count: 200 → 208.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I11** (new): `RepoPatch` is a strict subset of what `cnb
+  repo edit` historically accepted — no `name`, no
+  `default_branch`. Surfaces a real gap the cnb-api facade was
+  masking.
+- **SDK-I12** (new): `set_repo_visibility` uses a query string
+  rather than a JSON body. Disagrees with the prior cnb-api facade.
+  Following the SDK pending wire confirmation.
+- **SDK-I13** (new): `list_forks_repos` returns a wrapper struct,
+  not a `Vec`. Inconsistent with every other `list_*` method in
+  the SDK.
+
+### Removed
+
+- `commands::repo::visibility_to_level()` and its associated unit
+  test. SDK aliases `Visibility = String`, so we forward
+  `public|internal|private` verbatim and never need the integer
+  encoding on the request side. (`format_visibility` on the
+  *display* side stays — it still tolerates legacy integer
+  responses from older servers.)
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.5)
 
 - **`cnb label` is now backed entirely by the typed SDK**

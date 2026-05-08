@@ -300,11 +300,80 @@ Each entry has:
   centralised so consumers do not silently disagree on what is
   rejected.
 
+### SDK-I11 · `RepoPatch` is a strict subset of what `cnb repo edit` historically accepted
+
+- **Surface**: `cnb::models::RepoPatch` (used by
+  `RepositoriesClient::update_repo`)
+- **Summary**: The typed PATCH body for a repository only carries
+  `description` / `license` / `site` / `topics`. It does **not**
+  include `name` or `default_branch`, both of which our hand-written
+  `cnb-api::services::repos::EditRepoBody` did expose. We have no way
+  to tell whether the upstream server silently dropped those fields
+  before (the cnb-api code path serialised them anyway and ignored
+  the response shape) or if they require a different endpoint
+  (likely `set-default-branch` / `rename`, which the SDK does not
+  yet model).
+- **Workaround**: `cnb repo edit` rejects `--name` and
+  `--default-branch` with a clear `BadArgs` (exit 3) pointing at the
+  web UI for now, and accepts only `--description`. The CLI does
+  NOT silently drop the flags — that would be worse than the
+  facade's current behaviour.
+- **Desired fix**: either (a) extend `RepoPatch` to include `name`
+  and `default_branch` if the server actually supports them on the
+  same `PATCH /{repo}` endpoint, or (b) generate dedicated typed
+  methods (`rename_repo`, `set_default_branch`) for whatever
+  endpoint the server actually exposes.
+- **Severity**: annoyance — surfaces a real gap that the cnb-api
+  facade was masking.
+
+### SDK-I12 · `set_repo_visibility` uses a query string, not a body
+
+- **Surface**: `cnb::repositories::RepositoriesClient::set_repo_visibility`
+- **Summary**: The SDK builds `POST
+  /{repo}/-/settings/set_visibility?visibility=public` with the
+  visibility value as a query parameter. The hand-written cnb-api
+  facade for the same endpoint sent a JSON body
+  `{"visibility_level": 0}` instead. Both cannot be right; we have
+  no integration coverage either way (no wiremock test against
+  `set-visibility` in the legacy suite). Going with the SDK on the
+  assumption it tracks the OpenAPI spec.
+- **Workaround**: new `repo set-visibility` integration test is
+  written against the SDK's request shape (query string). If a
+  real cnb.cool server rejects the request, this row gets bumped
+  to **blocker** and we fix in CLI by routing the call through
+  `Context::sdk_raw_get`-style raw HTTP with a hand-built body.
+- **Desired fix**: confirm with the server team which
+  representation is canonical. Document on the SDK method.
+- **Severity**: annoyance until proven by the wire — could be a
+  blocker.
+
+### SDK-I13 · `list_forks_repos` returns a wrapper object, not a `Vec`
+
+- **Surface**: `cnb::repositories::RepositoriesClient::list_forks_repos`
+  returning `cnb::models::ListForks { fork_tree_count, forks: Option<Vec<Forks>> }`
+- **Summary**: Every other "list" method in the SDK returns
+  `Vec<T>` directly. `list_forks_repos` is the odd one out: it
+  wraps the slice in a struct that also carries a count. Not a bug
+  per se — the upstream endpoint really does return that envelope —
+  but it forces consumers to write `.forks.unwrap_or_default()`
+  every time and breaks the otherwise-uniform pattern. Easy to miss
+  on first read.
+- **Workaround**: `cnb repo fork` unwraps `.forks` with a default
+  empty vec so `--json` output stays an array (matching the cnb-api
+  facade's previous behaviour and `gh repo fork`'s output shape).
+- **Desired fix**: either rename the method to
+  `get_fork_summary_repos` to make the wrapper expectation
+  explicit, or expose a sibling `list_forks_repos_flat` that
+  returns just the `Vec<Forks>`.
+- **Severity**: polish.
+
 ---
 
 ## Resolved issues
 
 _(none yet)_
+
+---
 
 ---
 
