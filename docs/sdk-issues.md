@@ -19,9 +19,9 @@ Each entry has:
 
 ---
 
-## Triage summary (2026-05-08, Phase 2 steps 2.1–2.10 complete)
+## Triage summary (2026-05-08, Phase 2 steps 2.1–2.11 complete)
 
-Counts: **18 open, 0 resolved**. Grouped below by how we plan to
+Counts: **19 open, 0 resolved**. Grouped below by how we plan to
 surface them upstream — not by the individual severity tags inside
 each entry, which stay as the original per-port verdict.
 
@@ -51,6 +51,7 @@ consumer non-trivial boilerplate.
 | SDK-I02  | `Repos4User` DTO omits `default_branch` (and likely other server-side fields)   | DTO completeness          |
 | SDK-I08  | Same resource, two DTOs (`Pull` vs `PullRequest`) — share rendering is painful  | DTO completeness          |
 | SDK-I11  | `RepoPatch` cannot express `name` / `default_branch` — prior facade was lying   | DTO completeness          |
+| SDK-I19  | PR write DTOs miss `assignees`/`labels`/`base`/`remove_source_branch`           | DTO completeness          |
 | SDK-I13  | `list_forks_repos` returns `ListForks { forks: Option<Vec<_>> }` instead of vec | Signature consistency     |
 | SDK-I01  | `HttpInner::url()` + `base_url` are `pub(crate)` — no clean escape hatch        | Method visibility         |
 
@@ -73,22 +74,28 @@ group.
 
 ### Upstream-report rollout plan
 
-1. Land Phase 2 fully. As of step 2.10 the only cnb-api residue is:
+1. **Phase 2 is now functionally complete.** As of step 2.11 the
+   only cnb-api residue in `cnb-cli` is:
    - `cnb auth login/status` token validation (`users::get_self`)
      — Phase 1 hold-over, deliberately unchanged to keep the
      pre-auth HTTP path simple.
-   - `cnb issue` and `cnb pr` **write paths** (create / edit /
-     close / reopen / comment / assignees / labels) — still on
-     `cnb_api::services::{issues,pulls}` pending a step 2.11
-     port. Read paths (view / list) are SDK-backed.
+   - `cnb issue create --attach` and `cnb issue comment --attach`
+     attachment uploads (`services::uploads`) — same JSON-only
+     transport blocker as SDK-I14, scoped out of step 2.11.
    - `cnb api` raw passthrough — structurally cannot use the
      SDK's JSON-only transport (see SDK-I14).
+
+   The `cnb-api::services::{builds,issues,labels,missions,orgs,pulls,
+   registries,releases,repo_extras,repos,workspaces}` modules have
+   all been deleted. The crate is now ~90% smaller and only carries
+   `Client` + `tracing_layer` + `users::get_self` + `uploads`.
 2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.
-3. File the **Tier B bundle** as one consolidated issue titled
-   something like *"DTO completeness & method-signature consistency
-   during the cnb-cli port"*, linking to specific commits per sub-case.
+3. File the **Tier B bundle** (six items) as one consolidated issue
+   titled something like *"DTO completeness & method-signature
+   consistency during the cnb-cli port"*, linking to specific commits
+   per sub-case.
 4. File the **Tier C meta-issue** last — list the eight sub-items
    with a one-paragraph justification each; no reproducer required.
 5. Offer a patch PR for whatever looks least controversial (I04
@@ -626,6 +633,51 @@ group.
   spec exposes one).
 - **Severity**: annoyance — the raw-PUT workaround is reusable
   for any SDK endpoint that models only a subset of verbs.
+
+### SDK-I19 · PR write-path DTOs miss CLI-relevant fields (`assignees`/`labels`/`base`/`remove_source_branch`)
+
+- **Surface**:
+  - `cnb::models::PullCreationForm` — has `title`, `head`, `base`,
+    `body`, `head_repo`. **Missing**: `assignees`, `labels`.
+  - `cnb::models::PatchPullRequest` — has `title`, `body`, `state`.
+    **Missing**: `base` (no way to retarget a PR to a different base
+    branch).
+  - `cnb::models::MergePullRequest` — has `merge_style`,
+    `commit_title`, `commit_message`. **Missing**:
+    `remove_source_branch` (the "delete branch on merge" toggle).
+  - The `merge_method` key the cnb-api facade used previously is
+    renamed to `merge_style` on the SDK; the wire shape has not been
+    independently confirmed.
+- **Summary**: Three independent gaps in the typed PR write surface.
+  The cnb-api facade serialised `assignees` / `labels` /
+  `target_branch` (= base) / `remove_source_branch` anyway and
+  silently relied on the server to either honour or drop them; the
+  SDK pins each form to a strict shape, so a typed-only call cannot
+  forward those fields at all. Whether the server actually accepts
+  any of them with no schema entry is unknown — we have no
+  integration evidence either way.
+- **Workaround**: `cnb pr create --assignee` / `--label` and
+  `cnb pr edit --base` and `cnb pr merge --delete-branch` are now
+  rejected at the CLI layer with a `BadArgs` (exit 3) pointing the
+  user at the composable alternative (`pr create` + follow-up
+  `pr assign --add` / `pr label --add`; for `--delete-branch`,
+  delete the source branch as a separate step after merge). This
+  surfaces the gap rather than letting the typed call silently
+  drop the user's intent.
+- **Desired fix**:
+  1. Add `assignees: Option<Vec<String>>` and
+     `labels: Option<Vec<String>>` to `PullCreationForm`.
+  2. Add `base: Option<String>` to `PatchPullRequest` (the
+     `/{repo}/-/pulls/{number}` PATCH endpoint should support
+     retargeting; if the server truly does not, document the
+     restriction on the method).
+  3. Add `remove_source_branch: Option<bool>` to
+     `MergePullRequest`. Confirm the wire field name — `merge_style`
+     vs `merge_method` — and document the canonical one on the SDK
+     method.
+- **Severity**: annoyance — three usability hits in the most-used
+  PR command surface. The rejection messages keep behaviour
+  predictable, but each is a feature loss vs. the old facade.
 
 ---
 

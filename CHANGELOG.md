@@ -7,6 +7,103 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.11 — Phase 2 done)
+
+- **`cnb issue` write paths ported to the typed SDK**
+  (`cnb_sdk::issues::IssuesClient`): `create`, `edit`, `close`,
+  `reopen`, `comment`, `comment-edit`, `assign`, `label`, `comments`
+  (list), `activity`, `properties` (read and write). The two
+  `--attach` flows (`create --attach`, `comment --attach`) keep
+  using the cnb-api `services::uploads` facade — the two-phase asset
+  upload is the same SDK-I14 transport gap that `release upload`
+  hits. All non-attach paths are SDK-only.
+- **`cnb pr` write paths ported to the typed SDK**
+  (`cnb_sdk::pulls::PullsClient`): `create`, `edit`, `close`,
+  `reopen`, `comment`, `diff` (files), `commits`, `checkout`,
+  `assign`, `label`, `merge`, `review`, `checks`, `batch`. The
+  `checkout` flow now reads the source branch via the same
+  `read_branch` helper PR list / view use, since `Pull.head` is
+  still `Option<serde_json::Value>` (SDK-I09).
+
+### Removed — `cnb-api` surface reduction (~90% smaller)
+
+The following service facade modules are deleted from `cnb-api`,
+because nothing in `cnb-cli` references them anymore:
+
+- `services::builds`
+- `services::issues`
+- `services::labels`
+- `services::missions`
+- `services::orgs`
+- `services::pulls`
+- `services::registries`
+- `services::releases`
+- `services::repo_extras`
+- `services::repos`
+- `services::workspaces`
+
+What remains in `cnb-api`:
+
+- `Client` / `ClientBuilder` / `PassthroughResponse` — used by
+  `cnb api` raw passthrough and `cnb auth login` token validation.
+- `services::users::get_self` — Phase 1 hold-over for
+  `cnb auth login/status`.
+- `services::uploads` — two-phase asset upload for
+  `cnb issue create --attach` / `cnb issue comment --attach`.
+- `tracing_layer` — `is_sensitive` helper used by `cnb api`
+  redaction.
+
+Total project test count: 238 → **201** (we lost the 37 unit tests
+that lived alongside the deleted facades; every SDK-backed verb has
+its own wiremock integration test in `crates/cnb/tests/`).
+
+### Changed — surface gaps now made explicit (SDK-I19)
+
+The SDK's typed PR write bodies are strict subsets of what the
+prior cnb-api facade serialised. We surface these gaps as `BadArgs`
+(exit 3) at the CLI layer instead of letting the typed call
+silently drop the user's intent:
+
+- `cnb pr create --assignee USER` and `--label LABEL` are
+  rejected. `PullCreationForm` carries no such fields. Workaround:
+  `pr create` then `pr assign --add` / `pr label --add`.
+- `cnb pr edit --base BRANCH` is rejected. `PatchPullRequest` has
+  no `base` field — retargeting is not expressible on the typed
+  API.
+- `cnb pr merge --delete-branch` is rejected. `MergePullRequest`
+  has no `remove_source_branch` field. Workaround: delete the
+  source branch as a separate post-merge step.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I19** (new, Tier B): PR write DTOs miss
+  `assignees` / `labels` (create), `base` (edit),
+  `remove_source_branch` (merge). The cnb-api facade serialised
+  these anyway and silently relied on the server to accept or
+  drop them; the SDK pins each form to a strict shape. We surface
+  the gaps explicitly at the CLI layer rather than masking them.
+
+### Phase 2 — done
+
+`cnb-cli` now exclusively uses `cnb-sdk` for every command surface
+the SDK covers. The remaining cnb-api residue is intentional and
+narrowly scoped (token validation pre-auth, `--attach` uploads
+under SDK-I14, raw `cnb api` passthrough).
+
+### Test fixture migrations
+
+To match the typed DTO shapes the SDK expects:
+
+- `m2_issue.rs`: `issue_create_sends_title_and_body` and
+  `issue_close_sends_state_closed` now respond with `"number":"99"`
+  / `"number":"7"` (string) instead of integer. The `IssueDetail`
+  DTO pins `number: Option<String>`.
+- `m2_label_pr.rs`: `pr_merge_with_yes_uses_put` now matches body
+  `{"merge_style":"squash"}` (the SDK's canonical key) instead of
+  the legacy `merge_method`. See SDK-I19.
+- `m3_pr_issue_extras.rs`: `pr_batch_emits_query_params` now
+  responds with string-form `number` to match `PullRequestInfo`.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.10)
 
 - **`cnb repo pin` / `unpin` / `list-pinned` / `contributors`

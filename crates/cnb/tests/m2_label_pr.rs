@@ -201,7 +201,10 @@ async fn pr_merge_with_yes_uses_put() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
         .and(path("/cnb/feedback/-/pulls/7/merge"))
-        .and(body_partial_json(json!({"merge_method":"squash"})))
+        // SDK body: `{merge_style, commit_title, commit_message}`.
+        // The cnb-api facade used to send `merge_method` (the legacy
+        // key); we now send the canonical SDK shape. See SDK-I19.
+        .and(body_partial_json(json!({"merge_style":"squash"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"merged":true})))
         .mount(&server)
         .await;

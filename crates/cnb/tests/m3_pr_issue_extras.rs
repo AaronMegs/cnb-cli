@@ -69,7 +69,7 @@ async fn pr_batch_emits_query_params() {
     Mock::given(method("GET"))
         .and(path("/cnb/feedback/-/pull-in-batch"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"number":1},{"number":2}
+            {"number":"1"},{"number":"2"}
         ])))
         .mount(&server)
         .await;

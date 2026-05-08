@@ -1,19 +1,24 @@
 //! `cnb issue` — issues, comments, assignees, labels (M2 §8.3, 11 subcommands).
 //!
-//! `list` and `view` are backed by the typed SDK (`cnb-sdk`) as of Phase 2
-//! step 2.3; the remaining subcommands still route through the hand-written
-//! `cnb-api` facade and will be ported module-by-module.
-//!
-//! `create` and `comment` support `--attach FILE...` which streams each file
-//! through CNB's upload endpoints and appends the returned URL to the issue
-//! body / comment body as markdown.
+//! Fully SDK-backed as of Phase 2 step 2.11, with one carve-out: the
+//! `--attach` flow on `create` / `comment` still routes through
+//! `cnb_api::services::uploads` because the two-phase asset upload
+//! flow there falls under SDK-I14 (non-JSON transport). All other
+//! verbs — `list`, `view`, `create` (no attachments), `edit`,
+//! `close`, `reopen`, `comment` (no attachments), `comment-edit`,
+//! `assign`, `label`, `comments` (list), `activity`, `properties`
+//! (read and write) — run through `cnb_sdk::issues::IssuesClient`.
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use cnb_api::services::{issues, uploads};
+use cnb_api::services::uploads;
 use cnb_api::Client;
-use cnb_sdk::issues::{ListIssuesQuery, ListUserIssuesQuery};
+use cnb_sdk::issues::{ListIssueActivitiesQuery, ListIssuesQuery, ListUserIssuesQuery};
+use cnb_sdk::models::{
+    DeleteIssueAssigneesForm, IssuePropertiesForm, PatchIssueCommentForm, PatchIssueForm, PostIssueAssigneesForm,
+    PostIssueCommentForm, PostIssueForm, PostIssueLabelsForm, PropertyForm,
+};
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -371,19 +376,38 @@ async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     let mut body = args.body.unwrap_or_default();
     if !args.attach.is_empty() {
+        // Attachment flow still rides on the cnb-api uploads facade —
+        // this is SDK-I14 (non-JSON transport) territory and is scoped
+        // out of step 2.11. The write of the issue itself is on the
+        // SDK though.
         let client = ctx.api()?;
         body = append_attachments(client, &repo, None, body, &args.attach).await?;
     }
-    let payload = issues::CreateIssueBody {
-        title: args.title,
+    let payload = PostIssueForm {
+        title: Some(args.title),
         body: if body.is_empty() { None } else { Some(body) },
-        assignees: args.assignee,
-        labels: args.label,
+        assignees: if args.assignee.is_empty() {
+            None
+        } else {
+            Some(args.assignee)
+        },
+        labels: if args.label.is_empty() { None } else { Some(args.label) },
         priority: args.priority,
+        ..Default::default()
     };
-    let client = ctx.api()?;
-    let v = issues::create(client, &repo, &payload).await?;
-    let n = v.get("number").and_then(Value::as_i64).unwrap_or(0);
+    let dto = {
+        let client = ctx.sdk()?;
+        client.issues().create_issue(repo.clone(), &payload).await?
+    };
+    // `IssueDetail.number` is `Option<String>` — parse to integer for
+    // the log line when possible, fall back to the raw string.
+    let n = dto
+        .number
+        .as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|n| n.to_string())
+        .or(dto.number)
+        .unwrap_or_else(|| "?".into());
     eprintln!("✓ Created #{n} in {repo}");
     Ok(())
 }
@@ -400,26 +424,35 @@ async fn edit(ctx: &mut Context, args: EditArgs) -> Result<(), CliError> {
             return Err(CliError::BadArgs(format!("--state must be open|closed, got {s}")));
         }
     }
-    let body = issues::EditIssueBody {
+    let body = PatchIssueForm {
         title: args.title,
         body: args.body,
         state: args.state,
         priority: args.priority,
+        ..Default::default()
     };
-    let client = ctx.api()?;
-    let _ = issues::edit(client, &repo, args.number, &body).await?;
+    let number_i64 = issue_number_i64(args.number)?;
+    let client = ctx.sdk()?;
+    let _ = client.issues().update_issue(repo.clone(), number_i64, &body).await?;
     eprintln!("✓ Updated #{} in {repo}", args.number);
     Ok(())
 }
 
 async fn close_or_reopen(ctx: &mut Context, args: NumberArgs, close: bool) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
+    // Close / reopen are thin wrappers around PATCH state={closed,open}
+    // — the SDK has no dedicated close_issue verb. Keep the CLI
+    // contract (`cnb issue close N`) by delegating to `update_issue`.
+    let body = PatchIssueForm {
+        state: Some(if close { "closed".into() } else { "open".into() }),
+        ..Default::default()
+    };
+    let number_i64 = issue_number_i64(args.number)?;
+    let client = ctx.sdk()?;
+    let _ = client.issues().update_issue(repo.clone(), number_i64, &body).await?;
     if close {
-        let _ = issues::close(client, &repo, args.number).await?;
         eprintln!("✓ Closed #{} in {repo}", args.number);
     } else {
-        let _ = issues::reopen(client, &repo, args.number).await?;
         eprintln!("✓ Reopened #{} in {repo}", args.number);
     }
     Ok(())
@@ -447,16 +480,33 @@ async fn comment(ctx: &mut Context, args: CommentArgs) -> Result<(), CliError> {
             "comment body is empty — pass --body, --body-file, or --attach".into(),
         ));
     }
-    let client = ctx.api()?;
-    let _ = issues::comment(client, &repo, args.number, &body).await?;
+    let payload = PostIssueCommentForm {
+        body: Some(body),
+        ..Default::default()
+    };
+    let number_i64 = issue_number_i64(args.number)?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .issues()
+        .post_issue_comment(repo.clone(), number_i64, &payload)
+        .await?;
     eprintln!("✓ Commented on #{} in {repo}", args.number);
     Ok(())
 }
 
 async fn comment_edit(ctx: &mut Context, args: CommentEditArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let _ = issues::edit_comment(client, &repo, args.number, args.comment_id, &args.body).await?;
+    let payload = PatchIssueCommentForm {
+        body: Some(args.body.clone()),
+    };
+    let number_i64 = issue_number_i64(args.number)?;
+    let comment_id_i64 = i64::try_from(args.comment_id)
+        .map_err(|_| CliError::BadArgs(format!("comment id out of range: {}", args.comment_id)))?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .issues()
+        .patch_issue_comment(repo.clone(), number_i64, comment_id_i64, &payload)
+        .await?;
     eprintln!("✓ Edited comment {} on #{}", args.comment_id, args.number);
     Ok(())
 }
@@ -468,13 +518,28 @@ async fn assign(ctx: &mut Context, args: AssignArgs) -> Result<(), CliError> {
             "pass --add USER[,USER..] and/or --remove USER[,USER..]".into(),
         ));
     }
-    let client = ctx.api()?;
+    // SDK's assignee endpoints take `number: String` (inconsistent with
+    // the rest of issues, see SDK-I07). Build it once up front.
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
     if !args.add.is_empty() {
-        let _ = issues::add_assignees(client, &repo, args.number, &args.add).await?;
+        let payload = PostIssueAssigneesForm {
+            assignees: Some(args.add.clone()),
+        };
+        let _ = client
+            .issues()
+            .post_issue_assignees(repo.clone(), number_str.clone(), &payload)
+            .await?;
         eprintln!("✓ Added assignees: {}", args.add.join(", "));
     }
     if !args.remove.is_empty() {
-        let _ = issues::remove_assignees(client, &repo, args.number, &args.remove).await?;
+        let payload = DeleteIssueAssigneesForm {
+            assignees: Some(args.remove.clone()),
+        };
+        let _ = client
+            .issues()
+            .delete_issue_assignees(repo.clone(), number_str, &payload)
+            .await?;
         eprintln!("✓ Removed assignees: {}", args.remove.join(", "));
     }
     Ok(())
@@ -487,13 +552,28 @@ async fn label(ctx: &mut Context, args: LabelArgs) -> Result<(), CliError> {
             "pass --add LABEL[,LABEL..] and/or --remove LABEL".into(),
         ));
     }
-    let client = ctx.api()?;
+    let number_i64 = issue_number_i64(args.number)?;
+    let client = ctx.sdk()?;
     if !args.add.is_empty() {
-        let _ = issues::add_labels(client, &repo, args.number, &args.add).await?;
+        let payload = PostIssueLabelsForm {
+            labels: Some(args.add.clone()),
+        };
+        let _ = client
+            .issues()
+            .post_issue_labels(repo.clone(), number_i64, &payload)
+            .await?;
         eprintln!("✓ Added labels: {}", args.add.join(", "));
     }
     if let Some(name) = args.remove {
-        let _ = issues::remove_label(client, &repo, args.number, &name).await?;
+        // Keep the path-traversal guard that `cnb-api::labels::ensure_no_slash`
+        // had — the SDK itself does not validate (SDK-I10).
+        if name.contains('/') {
+            return Err(CliError::BadArgs(format!("label name must not contain `/`: {name:?}")));
+        }
+        let _ = client
+            .issues()
+            .delete_issue_label(repo.clone(), number_i64, name.clone())
+            .await?;
         eprintln!("✓ Removed label: {name}");
     }
     Ok(())
@@ -501,24 +581,35 @@ async fn label(ctx: &mut Context, args: LabelArgs) -> Result<(), CliError> {
 
 async fn comments(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let items = issues::list_comments(client, &repo, args.number).await?;
+    let number_i64 = issue_number_i64(args.number)?;
+    let client = ctx.sdk()?;
+    let items = client
+        .issues()
+        .list_issue_comments(repo, number_i64, &cnb_sdk::issues::ListIssueCommentsQuery::new())
+        .await?;
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise comments: {e}")))?;
     let mut stdout = std::io::stdout().lock();
-    json_out::write_json(&mut stdout, &Value::Array(items), ctx.io.stdout_is_tty)?;
+    json_out::write_json(&mut stdout, &v, ctx.io.stdout_is_tty)?;
     Ok(())
 }
 
 async fn activity(ctx: &mut Context, args: ActivityArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let q = format!("page={}&page_size={}", args.page, args.limit.max(1));
-    let client = ctx.api()?;
-    let items = issues::list_activities(client, &repo, args.number, &q).await?;
-    let v = Value::Array(items.clone());
+    let number_i64 = issue_number_i64(args.number)?;
+    let q = ListIssueActivitiesQuery::new()
+        .page(i64::from(args.page))
+        .page_size(i64::from(args.limit.max(1)));
+    let items = {
+        let client = ctx.sdk()?;
+        client.issues().list_issue_activities(repo, number_i64, &q).await?
+    };
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise activities: {e}")))?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let mut rows = Vec::with_capacity(items.len());
-    for it in &items {
+    let arr = v.as_array().cloned().unwrap_or_default();
+    let mut rows = Vec::with_capacity(arr.len());
+    for it in &arr {
         let t = it.get("type").and_then(Value::as_str).unwrap_or("");
         let actor = it
             .get("actor")
@@ -539,16 +630,20 @@ async fn activity(ctx: &mut Context, args: ActivityArgs) -> Result<(), CliError>
 
 async fn properties(ctx: &mut Context, args: PropertiesArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
+    let number_i64 = issue_number_i64(args.number)?;
     if args.set.is_empty() {
         // Read mode.
-        let client = ctx.api()?;
-        let items = issues::list_properties(client, &repo, args.number).await?;
-        let v = Value::Array(items.clone());
+        let items = {
+            let client = ctx.sdk()?;
+            client.issues().get_issue_properties(repo, number_i64).await?
+        };
+        let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise properties: {e}")))?;
         if render(ctx, &args.out, &v)? {
             return Ok(());
         }
-        let mut rows = Vec::with_capacity(items.len());
-        for it in &items {
+        let arr = v.as_array().cloned().unwrap_or_default();
+        let mut rows = Vec::with_capacity(arr.len());
+        for it in &arr {
             let key = it.get("key").and_then(Value::as_str).unwrap_or("");
             let name = it.get("name").and_then(Value::as_str).unwrap_or("");
             let val = it.get("value").and_then(Value::as_str).unwrap_or("");
@@ -564,15 +659,25 @@ async fn properties(ctx: &mut Context, args: PropertiesArgs) -> Result<(), CliEr
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| CliError::BadArgs(format!("--set must be KEY=VALUE: {kv}")))?;
-        updates.push(issues::PropertyUpdate {
-            key: k.to_owned(),
-            value: v.to_owned(),
+        updates.push(PropertyForm {
+            key: Some(k.to_owned()),
+            value: Some(v.to_owned()),
         });
     }
-    let client = ctx.api()?;
-    let _ = issues::set_properties(client, &repo, args.number, updates).await?;
+    let body = IssuePropertiesForm {
+        properties: Some(updates),
+    };
+    let client = ctx.sdk()?;
+    let _ = client.issues().update_issue_properties(repo, number_i64, &body).await?;
     eprintln!("✓ Updated {} property/properties on #{}", args.set.len(), args.number);
     Ok(())
+}
+
+/// Convert the CLI's `u64` issue-number parameter into the `i64` the
+/// SDK expects, surfacing a clear `BadArgs` on overflow instead of a
+/// `try_from` panic.
+fn issue_number_i64(n: u64) -> Result<i64, CliError> {
+    i64::try_from(n).map_err(|_| CliError::BadArgs(format!("issue number out of range: {n}")))
 }
 
 /// Stream every file in `paths` to CNB and append the returned URLs to `body`

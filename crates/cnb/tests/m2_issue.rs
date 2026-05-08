@@ -73,7 +73,7 @@ async fn issue_create_sends_title_and_body() {
     Mock::given(method("POST"))
         .and(path("/cnb/feedback/-/issues"))
         .and(body_partial_json(json!({"title":"new bug","body":"something broke"})))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number":99})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"number":"99"})))
         .mount(&server)
         .await;
 
@@ -101,7 +101,7 @@ async fn issue_close_sends_state_closed() {
     Mock::given(method("PATCH"))
         .and(path("/cnb/feedback/-/issues/7"))
         .and(body_partial_json(json!({"state":"closed"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"number":7,"state":"closed"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"number":"7","state":"closed"})))
         .mount(&server)
         .await;
 

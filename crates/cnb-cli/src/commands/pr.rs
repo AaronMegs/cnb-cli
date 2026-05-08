@@ -1,14 +1,31 @@
 //! `cnb pr` — pull requests (M2 §8.4, 12 subcommands). `cnb mr` is a CLI alias.
 //!
-//! `list` and `view` are backed by the typed SDK (`cnb-sdk`) as of Phase 2
-//! step 2.4; the remaining subcommands still route through the hand-written
-//! `cnb-api` facade and will be ported module-by-module.
+//! Fully SDK-backed as of Phase 2 step 2.11. All verbs route through
+//! `cnb_sdk::pulls::PullsClient`. Two CLI flags are explicitly rejected
+//! because the corresponding SDK typed bodies (`PullCreationForm`,
+//! `PatchPullRequest`, `MergePullRequest`) do not express them — the
+//! cnb-api facade used to silently drop those fields:
+//!
+//! - `pr create --assignee` / `--label` → rejected. `PullCreationForm`
+//!   has no `assignees` / `labels` fields. Users should `pr create`
+//!   then `pr assign` / `pr label` as follow-up calls.
+//! - `pr edit --base <B>` → rejected. `PatchPullRequest` only carries
+//!   `title` / `body` / `state`. Retargeting a PR is not expressible
+//!   on the SDK today.
+//! - `pr merge --delete-branch` → rejected. `MergePullRequest` has no
+//!   `remove_source_branch` field. Users should delete the branch via
+//!   a separate step after merge.
+//!
+//! All three gaps are tracked under SDK-I19.
 
 use std::process::Command;
 
 use clap::{Args, Subcommand};
-use cnb_api::services::pulls;
-use cnb_sdk::pulls::ListPullsQuery;
+use cnb_sdk::models::{
+    DeletePullAssigneesForm, MergePullRequest, PatchPullRequest, PostPullAssigneesForm, PostPullLabelsForm,
+    PullCommentCreationForm, PullCreationForm, PullReviewCreationForm,
+};
+use cnb_sdk::pulls::{ListPullCommitsQuery, ListPullsByNumbersQuery, ListPullsQuery};
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -366,22 +383,41 @@ fn read_branch(primary: Option<&Value>, fallback: Option<&Value>) -> String {
 
 async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
+    // `PullCreationForm` has no `assignees` / `labels` fields, so
+    // forwarding them silently would be a lie. Reject upfront and
+    // point at the composable alternative. See SDK-I19.
+    if !args.assignee.is_empty() {
+        return Err(CliError::BadArgs(
+            "`pr create --assignee` is not expressible on the SDK body (PullCreationForm); \
+             create the PR then run `pr assign --add USER` (SDK-I19)"
+                .into(),
+        ));
+    }
+    if !args.label.is_empty() {
+        return Err(CliError::BadArgs(
+            "`pr create --label` is not expressible on the SDK body (PullCreationForm); \
+             create the PR then run `pr label --add LABEL` (SDK-I19)"
+                .into(),
+        ));
+    }
     let head = match args.head {
         Some(h) => h,
         None => current_branch()?,
     };
-    let payload = pulls::CreatePullBody {
-        title: args.title,
-        source_branch: head,
-        target_branch: args.base,
+    let payload = PullCreationForm {
+        title: Some(args.title),
+        head: Some(head),
+        base: Some(args.base),
         body: args.body,
-        source_repo: None,
-        assignees: args.assignee,
-        labels: args.label,
+        head_repo: None,
     };
-    let client = ctx.api()?;
-    let v = pulls::create(client, &repo, &payload).await?;
-    let n = v.get("number").and_then(Value::as_i64).unwrap_or(0);
+    let dto = {
+        let client = ctx.sdk()?;
+        client.pulls().post_pull(repo.clone(), &payload).await?
+    };
+    // `Pull.number` is `Option<String>` — render as `#{n}` with a
+    // tolerant display fallback.
+    let n = dto.number.as_deref().unwrap_or("?");
     eprintln!("✓ Created PR #{n} in {repo}");
     Ok(())
 }
@@ -390,29 +426,44 @@ async fn edit(ctx: &mut Context, args: EditArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     if args.title.is_none() && args.body.is_none() && args.state.is_none() && args.base.is_none() {
         return Err(CliError::BadArgs(
-            "nothing to edit — pass --title/--body/--state/--base".into(),
+            "nothing to edit — pass --title/--body/--state".into(),
         ));
     }
-    let body = pulls::EditPullBody {
+    // See SDK-I19: PatchPullRequest does not carry `base`. The
+    // cnb-api facade silently dropped this; we surface it as a
+    // clean error instead.
+    if args.base.is_some() {
+        return Err(CliError::BadArgs(
+            "`pr edit --base` is not expressible on the SDK body (PatchPullRequest); \
+             retargeting a PR is not currently supported via the typed API (SDK-I19)"
+                .into(),
+        ));
+    }
+    let body = PatchPullRequest {
         title: args.title,
         body: args.body,
         state: args.state,
-        target_branch: args.base,
     };
-    let client = ctx.api()?;
-    let _ = pulls::edit(client, &repo, args.number, &body).await?;
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
+    let _ = client.pulls().patch_pull(repo.clone(), number_str, &body).await?;
     eprintln!("✓ Updated PR #{} in {repo}", args.number);
     Ok(())
 }
 
 async fn close_or_reopen(ctx: &mut Context, args: NumberArgs, close: bool) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
+    // Reuse PATCH state just like issues — SDK has no dedicated verb.
+    let body = PatchPullRequest {
+        state: Some(if close { "closed".into() } else { "open".into() }),
+        ..Default::default()
+    };
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
+    let _ = client.pulls().patch_pull(repo.clone(), number_str, &body).await?;
     if close {
-        let _ = pulls::close(client, &repo, args.number).await?;
         eprintln!("✓ Closed PR #{} in {repo}", args.number);
     } else {
-        let _ = pulls::reopen(client, &repo, args.number).await?;
         eprintln!("✓ Reopened PR #{} in {repo}", args.number);
     }
     Ok(())
@@ -420,16 +471,27 @@ async fn close_or_reopen(ctx: &mut Context, args: NumberArgs, close: bool) -> Re
 
 async fn comment(ctx: &mut Context, args: CommentArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let _ = pulls::comment(client, &repo, args.number, &args.body).await?;
+    let payload = PullCommentCreationForm {
+        body: Some(args.body.clone()),
+    };
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
+    let _ = client
+        .pulls()
+        .post_pull_comment(repo.clone(), number_str, &payload)
+        .await?;
     eprintln!("✓ Commented on PR #{} in {repo}", args.number);
     Ok(())
 }
 
 async fn diff(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = pulls::files(client, &repo, args.number).await?;
+    let number_str = args.number.to_string();
+    let items = {
+        let client = ctx.sdk()?;
+        client.pulls().list_pull_files(repo, number_str).await?
+    };
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise files: {e}")))?;
     let mut stdout = std::io::stdout().lock();
     json_out::write_json(&mut stdout, &v, ctx.io.stdout_is_tty)?;
     Ok(())
@@ -437,8 +499,13 @@ async fn diff(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
 
 async fn commits(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = pulls::commits(client, &repo, args.number).await?;
+    let number_str = args.number.to_string();
+    let q = ListPullCommitsQuery::new();
+    let items = {
+        let client = ctx.sdk()?;
+        client.pulls().list_pull_commits(repo, number_str, &q).await?
+    };
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise commits: {e}")))?;
     let mut stdout = std::io::stdout().lock();
     json_out::write_json(&mut stdout, &v, ctx.io.stdout_is_tty)?;
     Ok(())
@@ -446,13 +513,22 @@ async fn commits(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
 
 async fn checkout(ctx: &mut Context, args: CheckoutArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let pr = pulls::view(client, &repo, args.number).await?;
-    let source_branch = pr
-        .get("source_branch")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CliError::Generic(format!("PR #{} has no source_branch", args.number)))?
-        .to_owned();
+    let number_str = args.number.to_string();
+    // Typed `get_pull` returns `Pull` whose `head` is still
+    // `Option<serde_json::Value>` (SDK-I09) — reuse the same
+    // `read_branch` helper we used to render PR list.
+    let pr = {
+        let client = ctx.sdk()?;
+        client.pulls().get_pull(repo, number_str).await?
+    };
+    let pr_value = serde_json::to_value(&pr).map_err(|e| CliError::Generic(format!("serialise PR: {e}")))?;
+    let source_branch = read_branch(pr_value.get("head"), pr_value.get("source_branch"));
+    if source_branch.is_empty() {
+        return Err(CliError::Generic(format!(
+            "PR #{} has no source branch (could not extract `head.branch` or `source_branch`)",
+            args.number
+        )));
+    }
     let local_branch = args.branch.unwrap_or_else(|| format!("pr/{}", args.number));
 
     // git fetch origin <source_branch>:<local_branch>
@@ -483,13 +559,26 @@ async fn assign(ctx: &mut Context, args: AssignArgs) -> Result<(), CliError> {
             "pass --add USER[,USER..] and/or --remove USER[,USER..]".into(),
         ));
     }
-    let client = ctx.api()?;
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
     if !args.add.is_empty() {
-        let _ = pulls::add_assignees(client, &repo, args.number, &args.add).await?;
+        let payload = PostPullAssigneesForm {
+            assignees: Some(args.add.clone()),
+        };
+        let _ = client
+            .pulls()
+            .post_pull_assignees(repo.clone(), number_str.clone(), &payload)
+            .await?;
         eprintln!("✓ Added assignees: {}", args.add.join(", "));
     }
     if !args.remove.is_empty() {
-        let _ = pulls::remove_assignees(client, &repo, args.number, &args.remove).await?;
+        let payload = DeletePullAssigneesForm {
+            assignees: Some(args.remove.clone()),
+        };
+        let _ = client
+            .pulls()
+            .delete_pull_assignees(repo.clone(), number_str, &payload)
+            .await?;
         eprintln!("✓ Removed assignees: {}", args.remove.join(", "));
     }
     Ok(())
@@ -502,13 +591,28 @@ async fn label(ctx: &mut Context, args: LabelArgs) -> Result<(), CliError> {
             "pass --add LABEL[,LABEL..] and/or --remove LABEL".into(),
         ));
     }
-    let client = ctx.api()?;
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
     if !args.add.is_empty() {
-        let _ = pulls::add_labels(client, &repo, args.number, &args.add).await?;
+        let payload = PostPullLabelsForm {
+            labels: Some(args.add.clone()),
+        };
+        let _ = client
+            .pulls()
+            .post_pull_labels(repo.clone(), number_str.clone(), &payload)
+            .await?;
         eprintln!("✓ Added labels: {}", args.add.join(", "));
     }
     if let Some(name) = args.remove {
-        let _ = pulls::remove_label(client, &repo, args.number, &name).await?;
+        if name.contains('/') {
+            return Err(CliError::BadArgs(format!("label name must not contain `/`: {name:?}")));
+        }
+        // `delete_pull_label` takes `number: String` — consistent
+        // with the rest of the pulls module.
+        let _ = client
+            .pulls()
+            .delete_pull_label(repo.clone(), number_str.clone(), name.clone())
+            .await?;
         eprintln!("✓ Removed label: {name}");
     }
     Ok(())
@@ -520,14 +624,23 @@ async fn merge(ctx: &mut Context, args: MergeArgs) -> Result<(), CliError> {
         &format!("Merge PR #{} into `{repo}` ({})? (y/N)", args.number, args.method),
         args.yes,
     )?;
-    let body = pulls::MergeBody {
-        merge_method: Some(args.method.clone()),
+    // SDK body: {merge_style, commit_title, commit_message}. No
+    // `remove_source_branch` field — see SDK-I19.
+    if args.delete_branch {
+        return Err(CliError::BadArgs(
+            "`pr merge --delete-branch` is not expressible on the SDK body (MergePullRequest); \
+             delete the source branch as a separate step after merge (SDK-I19)"
+                .into(),
+        ));
+    }
+    let body = MergePullRequest {
+        merge_style: Some(args.method.clone()),
         commit_title: args.commit_title,
         commit_message: args.commit_message,
-        remove_source_branch: if args.delete_branch { Some(true) } else { None },
     };
-    let client = ctx.api()?;
-    let _ = pulls::merge(client, &repo, args.number, &body).await?;
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
+    let _ = client.pulls().merge_pull(repo.clone(), number_str, &body).await?;
     eprintln!("✓ Merged PR #{} ({})", args.number, args.method);
     Ok(())
 }
@@ -545,20 +658,28 @@ async fn review(ctx: &mut Context, args: ReviewArgs) -> Result<(), CliError> {
         }
         _ => unreachable!("clap conflicts_with prevents multi-select"),
     };
-    let body = pulls::CreateReviewBody {
-        event: event.to_owned(),
+    let body = PullReviewCreationForm {
+        event: Some(event.to_owned()),
         body: args.body,
+        comments: None,
     };
-    let client = ctx.api()?;
-    let _ = pulls::create_review(client, &repo, args.number, &body).await?;
+    let number_str = args.number.to_string();
+    let client = ctx.sdk()?;
+    let _ = client.pulls().post_pull_review(repo.clone(), number_str, &body).await?;
     eprintln!("✓ Submitted `{event}` review on PR #{}", args.number);
     Ok(())
 }
 
 async fn checks(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = pulls::checks(client, &repo, args.number).await?;
+    let number_i64 = i64::try_from(args.number)
+        .map_err(|_| CliError::BadArgs(format!("PR number out of range: {}", args.number)))?;
+    let statuses = {
+        let client = ctx.sdk()?;
+        client.pulls().list_pull_commit_statuses(repo, number_i64).await?
+    };
+    let v =
+        serde_json::to_value(&statuses).map_err(|e| CliError::Generic(format!("serialise commit statuses: {e}")))?;
     let mut stdout = std::io::stdout().lock();
     json_out::write_json(&mut stdout, &v, ctx.io.stdout_is_tty)?;
     Ok(())
@@ -566,8 +687,17 @@ async fn checks(ctx: &mut Context, args: NumberArgs) -> Result<(), CliError> {
 
 async fn batch(ctx: &mut Context, args: BatchArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = pulls::batch(client, &repo, &args.numbers).await?;
+    if args.numbers.is_empty() {
+        return Err(CliError::BadArgs("pass at least one PR number".into()));
+    }
+    let q = ListPullsByNumbersQuery {
+        n: Some(args.numbers.iter().map(|n| n.to_string()).collect()),
+    };
+    let items = {
+        let client = ctx.sdk()?;
+        client.pulls().list_pulls_by_numbers(repo, &q).await?
+    };
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise batch: {e}")))?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
