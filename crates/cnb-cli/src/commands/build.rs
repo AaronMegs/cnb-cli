@@ -1,10 +1,19 @@
 //! `cnb build` — pipeline builds (M3 §8.6, 8 subcommands).
+//!
+//! Phase 2, step 2.8 of the cnb-api → typed SDK migration. All 8
+//! subcommands now route through `cnb_sdk::build::BuildClient`. The
+//! runner-log download is the one exception: the SDK models the
+//! endpoint (`build_runner_download_log`) as JSON-returning, but the
+//! real response is plain text, so we fall back to a side-car
+//! `reqwest::Client` — same pattern as `cnb release download`, tracked
+//! under SDK-I14.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
-use cnb_api::services::builds;
+use cnb_sdk::build::GetBuildLogsQuery;
+use cnb_sdk::models::StartBuildReq;
 use cnb_tty::{jq, json_out, table, template};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::Value;
@@ -179,6 +188,10 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
     Ok(false)
 }
 
+fn to_value<T: serde::Serialize>(t: &T) -> Result<Value, CliError> {
+    serde_json::to_value(t).map_err(|e| CliError::Generic(format!("serialise response: {e}")))
+}
+
 async fn start(ctx: &mut Context, args: RunArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     let mut env_map = serde_json::Map::new();
@@ -192,22 +205,34 @@ async fn start(ctx: &mut Context, args: RunArgs) -> Result<(), CliError> {
         Some(p) => Some(std::fs::read_to_string(p)?),
         None => None,
     };
-    let body = builds::StartBuildBody {
+    // Note: SDK's `env` is typed as `Option<Value>` rather than a map.
+    // We feed an object when the user passed at least one `--env`,
+    // otherwise leave it `None` so the field is omitted from the
+    // request body (matches the prior cnb-api facade shape).
+    let env = if env_map.is_empty() {
+        None
+    } else {
+        Some(Value::Object(env_map))
+    };
+    let body = StartBuildReq {
         branch: args.branch,
         tag: args.tag,
         sha: args.sha,
         config,
         event: args.event,
-        env: env_map,
+        env,
         sync: if args.sync { Some("true".into()) } else { None },
     };
-    let client = ctx.api()?;
-    let v = builds::start(client, &repo, &body).await?;
+    let result = {
+        let client = ctx.sdk()?;
+        client.build().start_build(repo.clone(), &body).await?
+    };
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let sn = v.get("sn").and_then(Value::as_str).unwrap_or("(unknown)");
-    let url = v.get("buildLogUrl").and_then(Value::as_str).unwrap_or("");
+    let sn = result.sn.as_deref().unwrap_or("(unknown)");
+    let url = result.build_log_url.as_deref().unwrap_or("");
     eprintln!("✓ Build triggered: sn={sn}");
     if !url.is_empty() {
         eprintln!("  Logs: {url}");
@@ -216,31 +241,31 @@ async fn start(ctx: &mut Context, args: RunArgs) -> Result<(), CliError> {
 }
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    use std::fmt::Write;
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let mut q = format!("page={}&page_size={}", args.page, args.limit.max(1));
-    if let Some(s) = &args.status {
-        write!(&mut q, "&status={s}").expect("write to String");
+    let mut q = GetBuildLogsQuery::new()
+        .page(i64::from(args.page))
+        .page_size(i64::from(args.limit.max(1)));
+    if let Some(s) = args.status {
+        q = q.status(s);
     }
-    if let Some(b) = &args.branch {
-        write!(&mut q, "&sourceRef={b}").expect("write to String");
+    if let Some(b) = args.branch {
+        q = q.source_ref(b);
     }
-    let client = ctx.api()?;
-    let v = builds::list(client, &repo, &q).await?;
+    let result = {
+        let client = ctx.sdk()?;
+        client.build().get_build_logs(repo.clone(), &q).await?
+    };
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let arr = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut rows = Vec::with_capacity(arr.len());
-    for it in &arr {
-        let sn = it.get("sn").and_then(Value::as_str).unwrap_or("");
-        let status = it.get("status").and_then(Value::as_str).unwrap_or("");
-        let branch = it
-            .get("sourceRef")
-            .or_else(|| it.get("targetRef"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let created = it.get("createTime").and_then(Value::as_str).unwrap_or("");
+    let items = result.data.unwrap_or_default();
+    let mut rows = Vec::with_capacity(items.len());
+    for it in &items {
+        let sn = it.sn.as_deref().unwrap_or("");
+        let status = it.status.as_deref().unwrap_or("");
+        let branch = it.source_ref.as_deref().or(it.target_ref.as_deref()).unwrap_or("");
+        let created = it.create_time.as_deref().unwrap_or("");
         rows.push(vec![
             sn.to_owned(),
             status.to_owned(),
@@ -262,12 +287,15 @@ async fn status(ctx: &mut Context, args: StatusArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
 
     if !args.watch {
-        let client = ctx.api()?;
-        let v = builds::status(client, &repo, &args.sn).await?;
+        let result = {
+            let client = ctx.sdk()?;
+            client.build().get_build_status(repo.clone(), args.sn.clone()).await?
+        };
+        let v = to_value(&result)?;
         if render(ctx, &args.out, &v)? {
             return Ok(());
         }
-        let s = v.get("status").and_then(Value::as_str).unwrap_or("?");
+        let s = result.status.as_deref().unwrap_or("?");
         println!("status: {s}");
         return Ok(());
     }
@@ -288,22 +316,25 @@ async fn status(ctx: &mut Context, args: StatusArgs) -> Result<(), CliError> {
         None
     };
 
-    let client = ctx.api()?.clone();
+    // ApiClient is Clone (Arc-backed), so we can move it into the poll
+    // future without borrowing ctx across .await points.
+    let client = ctx.sdk()?.clone();
     let sn = args.sn.clone();
-    let result: Result<Value, CliError> = tokio::select! {
+    let repo2 = repo.clone();
+    let result: Result<cnb_sdk::models::BuildStatusResult, CliError> = tokio::select! {
         biased;
         _ = tokio::signal::ctrl_c() => Err(CliError::Interrupted),
         r = async {
             loop {
-                let v = builds::status(&client, &repo, &sn).await?;
-                let s = v.get("status").and_then(Value::as_str).unwrap_or("").to_owned();
+                let v = client.build().get_build_status(repo2.clone(), sn.clone()).await?;
+                let s = v.status.clone().unwrap_or_default();
                 if let Some(pb) = &pb {
                     pb.set_message(s.clone());
                 } else {
                     println!("status: {s}");
                 }
                 if is_terminal_status(&s) {
-                    return Ok::<Value, CliError>(v);
+                    return Ok::<cnb_sdk::models::BuildStatusResult, CliError>(v);
                 }
                 tokio::time::sleep(interval).await;
             }
@@ -313,11 +344,12 @@ async fn status(ctx: &mut Context, args: StatusArgs) -> Result<(), CliError> {
     if let Some(pb) = pb {
         pb.finish_and_clear();
     }
-    let v = result?;
+    let result = result?;
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let s = v.get("status").and_then(Value::as_str).unwrap_or("?");
+    let s = result.status.as_deref().unwrap_or("?");
     eprintln!("✓ Build {} finished with status `{s}`", args.sn);
     Ok(())
 }
@@ -331,8 +363,19 @@ fn is_terminal_status(s: &str) -> bool {
 
 async fn view_stage(ctx: &mut Context, args: ViewStageArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = builds::stage(client, &repo, &args.sn, &args.pipeline_id, &args.stage_id).await?;
+    let result = {
+        let client = ctx.sdk()?;
+        client
+            .build()
+            .get_build_stage(
+                repo.clone(),
+                args.sn.clone(),
+                args.pipeline_id.clone(),
+                args.stage_id.clone(),
+            )
+            .await?
+    };
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
@@ -341,10 +384,19 @@ async fn view_stage(ctx: &mut Context, args: ViewStageArgs) -> Result<(), CliErr
     Ok(())
 }
 
+/// Download the runner log. The SDK's typed `build_runner_download_log`
+/// returns `serde_json::Value`, but the real endpoint replies with plain
+/// text, so we use a side-car `reqwest::Client` (same pattern as
+/// `cnb release download`). See SDK-I14.
 async fn logs(ctx: &mut Context, args: LogsArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let body = builds::download_log(client, &repo, &args.pipeline_id).await?;
+    if args.pipeline_id.contains('/') {
+        return Err(CliError::BadArgs(format!(
+            "pipeline id must not contain `/`: {:?}",
+            args.pipeline_id
+        )));
+    }
+    let body = download_log_bytes(&repo, &args.pipeline_id).await?;
     if let Some(out) = args.output {
         std::fs::write(&out, body.as_bytes())?;
         eprintln!("✓ Wrote {} bytes to {}", body.len(), out.display());
@@ -354,11 +406,46 @@ async fn logs(ctx: &mut Context, args: LogsArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+async fn download_log_bytes(repo: &str, pipeline_id: &str) -> Result<String, CliError> {
+    let mut base = std::env::var("CNB_API_BASE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned());
+    if !base.ends_with('/') {
+        base.push('/');
+    }
+    let base_url =
+        url::Url::parse(&base).map_err(|e| CliError::Generic(format!("invalid SDK base url `{base}`: {e}")))?;
+    let full = base_url
+        .join(&format!("{repo}/-/build/runner/download/log/{pipeline_id}"))
+        .map_err(|e| CliError::Generic(format!("could not build log URL: {e}")))?;
+    let token = std::env::var("CNB_TOKEN").unwrap_or_default();
+    let mut req = reqwest::Client::new().get(full);
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| CliError::Generic(format!("log download GET failed: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(CliError::Generic(format!(
+            "log download GET {}: {text}",
+            status.as_u16()
+        )));
+    }
+    resp.text()
+        .await
+        .map_err(|e| CliError::Generic(format!("log body: {e}")))
+}
+
 async fn cancel(ctx: &mut Context, args: SnArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     ctx.confirm(&format!("Cancel build `{}` in `{repo}`? (y/N)", args.sn), args.yes)?;
-    let client = ctx.api()?;
-    let _ = builds::cancel(client, &repo, &args.sn).await?;
+    let client = ctx.sdk()?;
+    let _ = client.build().stop_build(repo.clone(), args.sn.clone()).await?;
     eprintln!("✓ Cancelled build {}", args.sn);
     Ok(())
 }
@@ -366,16 +453,19 @@ async fn cancel(ctx: &mut Context, args: SnArgs) -> Result<(), CliError> {
 async fn delete_logs(ctx: &mut Context, args: SnArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     ctx.confirm(&format!("Delete logs for `{}` in `{repo}`? (y/N)", args.sn), args.yes)?;
-    let client = ctx.api()?;
-    let _ = builds::delete_logs(client, &repo, &args.sn).await?;
+    let client = ctx.sdk()?;
+    let _ = client.build().build_logs_delete(repo.clone(), args.sn.clone()).await?;
     eprintln!("✓ Deleted logs for {}", args.sn);
     Ok(())
 }
 
 async fn crontab_sync(ctx: &mut Context, args: CrontabArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let _ = builds::crontab_sync(client, &repo, &args.branch).await?;
+    let client = ctx.sdk()?;
+    let _ = client
+        .build()
+        .build_crontab_sync(repo.clone(), args.branch.clone())
+        .await?;
     eprintln!("✓ Synced crontab pipelines for branch `{}` in {repo}", args.branch);
     Ok(())
 }

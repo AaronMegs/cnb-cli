@@ -1,7 +1,12 @@
-//! `cnb workspace` (alias `ws`) — cloud-native dev environments (M3 §8.7, 5 subcommands).
+//! `cnb workspace` (alias `ws`) — cloud-native dev environments
+//! (M3 §8.7, 5 subcommands).
+//!
+//! Phase 2, step 2.8 of the cnb-api → typed SDK migration. All 5
+//! subcommands now route through `cnb_sdk::workspace::WorkspaceClient`.
 
 use clap::{Args, Subcommand};
-use cnb_api::services::workspaces;
+use cnb_sdk::models::{StartWorkspaceReq, WorkspaceDeleteReq, WorkspaceStopReq};
+use cnb_sdk::workspace::ListWorkspacesQuery;
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -130,27 +135,35 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
     Ok(false)
 }
 
+fn to_value<T: serde::Serialize>(t: &T) -> Result<Value, CliError> {
+    serde_json::to_value(t).map_err(|e| CliError::Generic(format!("serialise response: {e}")))
+}
+
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    use std::fmt::Write;
-    let mut q = format!("page={}&page_size={}", args.page, args.limit.max(1));
-    if let Some(s) = &args.status {
-        write!(&mut q, "&status={s}").expect("write to String");
+    let mut q = ListWorkspacesQuery::new()
+        .page(i64::from(args.page))
+        .page_size(i64::from(args.limit.max(1)));
+    if let Some(s) = args.status {
+        q = q.status(s);
     }
-    if let Some(b) = &args.branch {
-        write!(&mut q, "&branch={b}").expect("write to String");
+    if let Some(b) = args.branch {
+        q = q.branch(b);
     }
-    let client = ctx.api()?;
-    let v = workspaces::list(client, &q).await?;
+    let result = {
+        let client = ctx.sdk()?;
+        client.workspace().list_workspaces(&q).await?
+    };
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let arr = v.get("list").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut rows = Vec::with_capacity(arr.len());
-    for it in &arr {
-        let sn = it.get("sn").and_then(Value::as_str).unwrap_or("");
-        let slug = it.get("slug").and_then(Value::as_str).unwrap_or("");
-        let branch = it.get("branch").and_then(Value::as_str).unwrap_or("");
-        let status = it.get("status").and_then(Value::as_str).unwrap_or("");
+    let items = result.list.unwrap_or_default();
+    let mut rows = Vec::with_capacity(items.len());
+    for it in &items {
+        let sn = it.sn.as_deref().unwrap_or("");
+        let slug = it.slug.as_deref().unwrap_or("");
+        let branch = it.branch.as_deref().unwrap_or("");
+        let status = it.status.as_deref().unwrap_or("");
         rows.push(vec![
             sn.to_owned(),
             slug.to_owned(),
@@ -170,14 +183,19 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
 
 async fn start(ctx: &mut Context, args: StartArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let body = workspaces::StartWorkspaceBody {
+    // `StartWorkspaceReq.ref_` in the SDK serialises as `"ref"` via
+    // serde rename, matching both the prior cnb-api facade and the
+    // wiremock expectations.
+    let body = StartWorkspaceReq {
         branch: args.branch,
-        r#ref: args.r#ref,
+        ref_: args.r#ref,
     };
-    let client = ctx.api()?;
-    let v = workspaces::start(client, &repo, &body).await?;
-    let url = v.get("url").and_then(Value::as_str).unwrap_or("");
-    let sn = v.get("sn").and_then(Value::as_str).unwrap_or("");
+    let result = {
+        let client = ctx.sdk()?;
+        client.workspace().start_workspace(repo.clone(), &body).await?
+    };
+    let url = result.url.as_deref().unwrap_or("");
+    let sn = result.sn.as_deref().unwrap_or("");
 
     if !sn.is_empty() {
         eprintln!("✓ Workspace pipeline triggered: sn={sn}");
@@ -189,7 +207,7 @@ async fn start(ctx: &mut Context, args: StartArgs) -> Result<(), CliError> {
             eprintln!("→ Opening: {url}");
             let _ = open::that(url);
         }
-    } else if let Some(msg) = v.get("message").and_then(Value::as_str) {
+    } else if let Some(msg) = result.message.as_deref() {
         eprintln!("  {msg}");
     }
     Ok(())
@@ -197,21 +215,31 @@ async fn start(ctx: &mut Context, args: StartArgs) -> Result<(), CliError> {
 
 async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
-    let client = ctx.api()?;
-    let v = workspaces::view(client, &repo, &args.sn).await?;
+    let result = {
+        let client = ctx.sdk()?;
+        client
+            .workspace()
+            .get_workspace_detail(repo.clone(), args.sn.clone())
+            .await?
+    };
 
     if args.web {
-        if let Some(url) = v.get("webide").and_then(Value::as_str) {
-            eprintln!("→ Opening: {url}");
-            let _ = open::that(url);
-            return Ok(());
+        if let Some(url) = result.webide.as_deref() {
+            if !url.is_empty() {
+                eprintln!("→ Opening: {url}");
+                let _ = open::that(url);
+                return Ok(());
+            }
         }
         return Err(CliError::Generic("workspace has no webide URL".into()));
     }
+    let v = to_value(&result)?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    // Card-style: list each access channel.
+    // Card-style: list each access channel. Keys below are the serde-
+    // renamed wire names (matching the prior cnb-api facade output),
+    // resolved through `Value::get` on the typed DTO serialisation.
     for key in ["webide", "remoteSsh", "ssh", "vscode", "cursor", "codebuddy", "jumpUrl"] {
         if let Some(s) = v.get(key).and_then(Value::as_str) {
             if !s.is_empty() {
@@ -222,17 +250,27 @@ async fn view(ctx: &mut Context, args: ViewArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn pick_target(sn: Option<String>, pipeline_id: Option<String>) -> Result<workspaces::WorkspaceTargetBody, CliError> {
+/// Common body preparation for `stop` + `delete`: at least one of
+/// `--sn` or `--pipeline-id` must be set. The SDK provides separate
+/// typed bodies (`WorkspaceStopReq` vs `WorkspaceDeleteReq`) that
+/// happen to share the same two fields — we build whichever one the
+/// caller requests through the narrow wrapper below to avoid stringy
+/// duplication.
+fn ensure_target(sn: Option<&String>, pipeline_id: Option<&String>) -> Result<(), CliError> {
     if sn.is_none() && pipeline_id.is_none() {
         return Err(CliError::BadArgs("pass --sn or --pipeline-id".into()));
     }
-    Ok(workspaces::WorkspaceTargetBody { pipeline_id, sn })
+    Ok(())
 }
 
 async fn stop(ctx: &mut Context, args: TargetArgs) -> Result<(), CliError> {
-    let body = pick_target(args.sn.clone(), args.pipeline_id.clone())?;
-    let client = ctx.api()?;
-    let _ = workspaces::stop(client, &body).await?;
+    ensure_target(args.sn.as_ref(), args.pipeline_id.as_ref())?;
+    let body = WorkspaceStopReq {
+        pipeline_id: args.pipeline_id.clone(),
+        sn: args.sn.clone(),
+    };
+    let client = ctx.sdk()?;
+    let _ = client.workspace().workspace_stop(&body).await?;
     eprintln!(
         "✓ Stopped workspace ({})",
         body.sn.as_deref().or(body.pipeline_id.as_deref()).unwrap_or("")
@@ -241,11 +279,15 @@ async fn stop(ctx: &mut Context, args: TargetArgs) -> Result<(), CliError> {
 }
 
 async fn delete(ctx: &mut Context, args: DeleteArgs) -> Result<(), CliError> {
-    let body = pick_target(args.sn.clone(), args.pipeline_id.clone())?;
-    let id = body.sn.as_deref().or(body.pipeline_id.as_deref()).unwrap_or("");
+    ensure_target(args.sn.as_ref(), args.pipeline_id.as_ref())?;
+    let id = args.sn.as_deref().or(args.pipeline_id.as_deref()).unwrap_or("");
     ctx.confirm(&format!("Delete workspace `{id}`? (y/N)"), args.yes)?;
-    let client = ctx.api()?;
-    let _ = workspaces::delete(client, &body).await?;
+    let body = WorkspaceDeleteReq {
+        pipeline_id: args.pipeline_id.clone(),
+        sn: args.sn.clone(),
+    };
+    let client = ctx.sdk()?;
+    let _ = client.workspace().delete_workspace(&body).await?;
     eprintln!("✓ Deleted workspace ({id})");
     Ok(())
 }
@@ -255,9 +297,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pick_target_requires_sn_or_pipeline() {
-        assert!(matches!(pick_target(None, None), Err(CliError::BadArgs(_))));
-        assert!(pick_target(Some("a".into()), None).is_ok());
-        assert!(pick_target(None, Some("p".into())).is_ok());
+    fn ensure_target_requires_sn_or_pipeline() {
+        assert!(matches!(ensure_target(None, None), Err(CliError::BadArgs(_))));
+        let a = "a".to_owned();
+        let p = "p".to_owned();
+        assert!(ensure_target(Some(&a), None).is_ok());
+        assert!(ensure_target(None, Some(&p)).is_ok());
     }
 }

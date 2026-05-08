@@ -7,6 +7,68 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Added (cnb-api → typed SDK migration, Phase 2 step 2.8)
+
+- **`cnb build` — all 8 subcommands ported to the typed SDK**
+  (`cnb_sdk::build::BuildClient`). Covers `run` / `list` / `status`
+  (incl. `--watch` polling) / `view` (stage) / `logs` / `cancel` /
+  `delete-logs` / `crontab-sync`. Typed DTOs (`StartBuildReq`,
+  `BuildResult`, `LogInfo`, `BuildStatusResult`, `BuildStageResult`,
+  `BuildCommonResult`) replace the hand-written cnb-api bodies.
+- **`cnb workspace` (alias `ws`) — all 5 subcommands ported to the
+  typed SDK** (`cnb_sdk::workspace::WorkspaceClient`). Covers
+  `list` / `start` / `view` / `stop` / `delete`. The `view`
+  card-style output now drives off `WorkspaceDetailResult`; the
+  key loop still reads via `Value::get` because the seven access-
+  channel names stay on the wire shape (`webide`, `remoteSsh`,
+  `jumpUrl`, …).
+- `cnb build logs` (runner log download) uses the same side-car
+  `reqwest::Client` pattern as `release download` — SDK's typed
+  `build_runner_download_log` returns `serde_json::Value` but the
+  server emits plain text. Third bytes endpoint to hit this issue;
+  see SDK-I14 (now covers `release upload` phase 2 + `release
+  download` + `build logs`).
+
+### Milestone marker
+
+- **Phase 2 milestone**: with `build` and `workspace` done, every
+  M3 top-level command (`release`, `build`, `workspace`) is on
+  the SDK. Combined with M2 (`repo`, `issue`, `pr`, `label`) and
+  M4-adjacent `search`, **the active front-line command surface
+  is now SDK-backed**. Remaining consumers of the `cnb-api` facade:
+  M4 groups (`registry`, `mission`, `org`), `repo pin/contributors`,
+  and the `api` raw passthrough. Those are the Step 2.9+ scope.
+
+### Test additions
+
+- 7 new wiremock integration tests in `m3_build_workspace`:
+  - `build_logs_downloads_plain_text_body` — end-to-end coverage of
+    the new side-car bytes path (GET → stdout → plain-text body).
+  - `build_logs_rejects_slashed_pipeline_id` — CLI-level guard
+    (`BadArgs` exit 3) mirrors the `ensure_no_slash` check we used
+    to get from the cnb-api layer, now moved into the command.
+  - `build_list_reads_typed_fields` — asserts the `LogInfo` typed
+    DTO carries `sn` / `status` / `sourceRef` / `targetRef` /
+    `createTime` end-to-end to TSV output.
+  - `build_cancel_with_yes_succeeds` — happy-path POST to
+    `/{repo}/-/build/stop/{sn}` via `stop_build`.
+  - `build_crontab_sync_hits_post_endpoint` — confirms
+    `build_crontab_sync` routes to the right path.
+  - `workspace_delete_with_yes_and_pipeline_id` — typed
+    `WorkspaceDeleteReq { pipelineId }` body on `POST /workspace/delete`.
+  - `workspace_view_card_lists_channels` — typed
+    `WorkspaceDetailResult` → `Value` → key-lookup render across
+    the four most common access channels.
+
+  Total project test count: 210 → **217**.
+
+### Tracked SDK friction (`docs/sdk-issues.md`)
+
+- **SDK-I14** extended to cover `build_runner_download_log` — same
+  root cause (JSON-only transport), different endpoint. Severity
+  stays *annoyance* but the case for a generic fix is now stronger
+  because three independent verbs share the same workaround.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.7)
 
 - **`cnb release` — all 9 subcommands ported to the typed SDK**

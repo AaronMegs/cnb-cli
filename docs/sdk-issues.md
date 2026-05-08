@@ -36,7 +36,7 @@ their own upstream issues with a minimal repro, not a summary bullet.
 |----------|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
 | SDK-I03  | `Visibility` alias does not accept integer-form responses                      | Blocks typed deserialisation on any server still emitting `0/10/20`.            |
 | SDK-I09  | `Pull.{head,base}` typed as `Option<Value>` — every UI reinvents `read_branch` | ~50% of MR tooling code is branch-name extraction; the SDK could own it.       |
-| SDK-I14  | No non-JSON transport — bytes endpoints need a side-car `reqwest::Client`      | Forces two HTTP clients per `release upload` / `download`; duplicates auth.     |
+| SDK-I14  | No non-JSON transport — bytes endpoints need a side-car `reqwest::Client`      | Forces two HTTP clients per `release upload` / `release download` / `build logs`; duplicates auth. |
 | SDK-I07  | Issue vs pull number typing disagrees across methods (`i64` vs `String`)       | Contagious — every downstream type definition has to pick a side and stick.    |
 
 ### Tier B · file together as a "generated-DTO polish" bundle
@@ -445,9 +445,14 @@ group.
     `serde_json::Value` for an endpoint whose real response is
     either a 302 redirect to a pre-signed URL or the file bytes
     themselves — trying to JSON-decode bytes yields a parse error.
+  - `cnb::build::BuildClient::build_runner_download_log` has the
+    same problem: returns `serde_json::Value` for an endpoint
+    whose body is plain text (`text/plain; charset=utf-8`), so
+    a typed-only call always fails with `expected value at line
+    1 column 1`.
 - **Summary**: The SDK's shared HTTP layer is JSON-only on both
-  the request and response legs. Two legitimate CNB flows need
-  raw bytes:
+  the request and response legs. Three legitimate CNB flows need
+  raw bytes today:
   1. **Two-phase release asset upload**, phase 2: `PUT
      <pre-signed upload_url>` with file bytes as the body. The SDK
      cannot express this — `execute_with_body` forces a JSON body.
@@ -455,28 +460,35 @@ group.
      returns a 302 to a signed URL whose body is file bytes.
      `get_releases_asset` on the SDK decodes that body as
      `serde_json::Value` and fails on anything non-JSON.
+  3. **Pipeline runner log download**: `GET /{repo}/-/build/runner/download/log/{pipelineId}`
+     returns plain text (the raw runner log). `build_runner_download_log`
+     on the SDK decodes as JSON and fails immediately on the first
+     non-JSON byte.
 
-  Neither flow can use the SDK's connection pool, retry logic, auth
-  header, or tracing. They also cannot reuse the SDK's resolved
-  token — the SDK does not expose the underlying `reqwest::Client`
-  either (only `&HttpInner`, which has no `fn client()` accessor),
-  so consumers re-read `CNB_TOKEN` from the env and build a fresh
-  `reqwest::Client`.
-- **Workaround**: `cnb-cli::commands::release` keeps a small side-
-  car pattern:
-  - Phase 1 (`POST asset-upload-url`) → typed SDK via
-    `post_release_asset_upload_url`.
-  - Phase 2 (`PUT upload_url`) → standalone `reqwest::Client::new()`
-    with `reqwest::Body::wrap_stream(ReaderStream::new(File::open))`.
-    No auth header (the pre-signed URL authorises via its own query
-    params).
-  - Phase 3 (`POST verify_url`) → reuses the SDK's `HttpInner::execute`
-    because the verify endpoint *does* return JSON and the SDK's
-    `execute(method, url)` accepts an arbitrary absolute `Url`.
-  - Download → standalone `reqwest::Client::new()`, `CNB_TOKEN`
-    read from env for `bearer_auth`. Same base-URL precedence
-    (`CNB_API_BASE` > default) as the SDK to keep wiremock fixtures
-    working.
+  None of these flows can use the SDK's connection pool, retry
+  logic, auth header, or tracing. They also cannot reuse the SDK's
+  resolved token — the SDK does not expose the underlying
+  `reqwest::Client` either (only `&HttpInner`, which has no
+  `fn client()` accessor), so consumers re-read `CNB_TOKEN` from
+  the env and build a fresh `reqwest::Client`.
+- **Workaround**: `cnb-cli::commands::release` and
+  `cnb-cli::commands::build` both keep the same small side-car
+  pattern:
+  - `release upload` phase 1 (`POST asset-upload-url`) → typed SDK
+    via `post_release_asset_upload_url`.
+  - `release upload` phase 2 (`PUT upload_url`) → standalone
+    `reqwest::Client::new()` with
+    `reqwest::Body::wrap_stream(ReaderStream::new(File::open))`.
+    No auth header (pre-signed URL).
+  - `release upload` phase 3 (`POST verify_url`) → reuses the
+    SDK's `HttpInner::execute` because the verify endpoint *does*
+    return JSON and the SDK's `execute(method, url)` accepts an
+    arbitrary absolute `Url`.
+  - `release download` and `build logs` → standalone
+    `reqwest::Client::new()`, `CNB_TOKEN` read from env for
+    `bearer_auth`. Same base-URL precedence
+    (`CNB_API_BASE` > default) as the SDK to keep wiremock
+    fixtures working.
 - **Desired fix**: one of
   1. Add `pub fn HttpInner::reqwest_client(&self) -> &reqwest::Client`
      so consumers can build ad-hoc requests (bytes PUT, streaming
@@ -486,13 +498,17 @@ group.
      arbitrary `reqwest::Body` instead of constraining the body to
      `Serialize`. Plus a streaming-response variant
      (`execute_bytes`) that returns `bytes::Bytes` instead of `T`.
-  3. Model the two-phase upload + download endpoints as first-class
-     typed methods (`upload_release_asset(path: impl AsRef<Path>)`,
-     `download_release_asset(..) -> bytes::Bytes`) so downstream
-     code never reaches for the raw HTTP layer at all.
+  3. Model all three bytes endpoints as first-class typed methods
+     (`upload_release_asset(path: impl AsRef<Path>)`,
+     `download_release_asset(..) -> bytes::Bytes`,
+     `download_runner_log(..) -> String`) so downstream code never
+     reaches for the raw HTTP layer at all.
 - **Severity**: annoyance — works via the side-car, but duplicates
-  connection-pool + auth concerns across two HTTP clients per run
-  of `cnb release upload` / `cnb release download`.
+  connection-pool + auth concerns across two HTTP clients for
+  every `cnb release upload` / `cnb release download` / `cnb build logs`
+  invocation. Three unrelated verbs share the same workaround,
+  which makes the case for a generic fix stronger than any one of
+  them alone.
 
 ---
 
