@@ -92,6 +92,12 @@ group.
 2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.
+   *Drafts ready in [`upstream-issues/`](./upstream-issues/) — one
+   markdown file per issue (SDK-I03, SDK-I07, SDK-I09, SDK-I14,
+   SDK-I15), each with anchor commit `b785d35` and a wiremock-shaped
+   minimal reproduction. Pending: pick a public mirror URL for the
+   `cnb-cli` repo and replace the `https://…` placeholders before
+   filing upstream.*
 3. File the **Tier B bundle** (six items) as one consolidated issue
    titled something like *"DTO completeness & method-signature
    consistency during the cnb-cli port"*, linking to specific commits

@@ -82,6 +82,17 @@ silently drop the user's intent:
   these anyway and silently relied on the server to accept or
   drop them; the SDK pins each form to a strict shape. We surface
   the gaps explicitly at the CLI layer rather than masking them.
+- **Tier A upstream-issue drafts written**
+  ([`docs/upstream-issues/`](./docs/upstream-issues/)). Five
+  self-contained markdown files — `SDK-I03.md`, `SDK-I07.md`,
+  `SDK-I09.md`, `SDK-I14.md`, `SDK-I15.md` — each with the
+  surface area, a minimal reproduction (live + wiremock-shaped),
+  observed wire shapes, the cnb-cli workaround, and a
+  prioritised suggested fix. Anchored to commit `b785d35`
+  (Phase 2 step 2.11). README in the same directory routes the
+  reader. Tier B / Tier C still live as the consolidated entries
+  in `sdk-issues.md`; will be drafted as standalone files only if
+  the upstream maintainer asks for them in that form.
 
 ### Phase 2 — done
 
