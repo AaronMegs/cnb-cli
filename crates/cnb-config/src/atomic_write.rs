@@ -83,7 +83,20 @@ fn set_secure_permissions(path: &Path) -> Result<(), ConfigError> {
 
 #[cfg(not(unix))]
 fn set_secure_permissions(_path: &Path) -> Result<(), ConfigError> {
-    // TODO(M5): set Windows ACL to current user only.
+    // Windows ACL hardening: tracked as a non-blocking follow-up.
+    //
+    // The typical `%APPDATA%\cnb\hosts.toml` path already lives under a
+    // per-user profile directory that NTFS restricts to the owning user
+    // (and administrators) via default inherited ACLs. That gives us
+    // *most* of the 0600 guarantee Unix gets from `chmod`: other
+    // non-admin accounts on the same machine cannot read the file.
+    //
+    // A fully-equivalent behaviour — stripping inherited ACLs and
+    // setting an explicit "owner SID only" DACL — requires
+    // `windows-sys` / `windows` crate bindings and is scoped out of
+    // the cross-platform MVP. Revisit if/when we ship a Windows-first
+    // deployment scenario where non-default profile locations are in
+    // play.
     Ok(())
 }
 

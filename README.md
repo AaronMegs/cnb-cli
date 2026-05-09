@@ -141,6 +141,8 @@ cnb api /user --template '{username}: {email}'
 ## Documentation
 
 - [DESIGN.md](DESIGN.md) — Architecture, command catalog, roadmap (single source of truth).
+- [docs/known-gaps.md](docs/known-gaps.md) — Open items that are **blocked on external dependencies** (upstream SDK fixes, server-team clarifications, hosting infra). Single-page dashboard for anyone picking up the project.
+- [docs/sdk-issues.md](docs/sdk-issues.md) — 19 tracked upstream SDK issues + rollout plan. Consolidated Chinese summary: [`docs/upstream-issues/SDK-反馈汇总.md`](docs/upstream-issues/SDK-反馈汇总.md).
 - `cnb --help`, `cnb <command> --help` — Built-in help.
 
 ## Milestone status
@@ -155,9 +157,9 @@ cnb api /user --template '{username}: {email}'
 | **M5.0**  | ✅ done    | `cnb update`, `release.yml`, `scripts/install.sh`, CI hardening                |
 | **M5.1**  | ✅ done    | man pages + 5-shell completions baked into release archives, cosign keyless signing, mdbook handbook scaffold, Homebrew/Scoop manifest templates |
 | **SDK-1** | ✅ done    | Phase 1 of the cnb-api → typed SDK migration: depends on external crate `cnb = "0.2"`, pilots it via new `cnb search` (first consumer), keeps `cnb-api` facades in place for all other commands |
-| **SDK-2** | done       | Phase 2 complete: every command group `cnb-cli` exposes is typed-SDK-backed for read **and** write paths. Eleven service facades deleted from `cnb-api` — only `Client` + `tracing_layer` + `users::get_self` (`auth login` token validation) + `uploads` (`issue --attach`, blocked by SDK-I14) remain. See `docs/sdk-issues.md` for 19 tracked upstream issues. |
-| **M5.2**  | partial    | apt / yum repos, Docker image — needs external infra (out of band) |
-| **M6**    | partial    | sigstore signing ✅; mdbook deploy + external case study — out of band |
+| **SDK-2** | ✅ done    | Phase 2 + `users::get_self` follow-up: every command group `cnb-cli` exposes (read AND write) routes through the typed SDK. All twelve service facades deleted from `cnb-api` — only `Client` + `tracing_layer` + `uploads` (`issue --attach`, blocked by SDK-I14) remain. See [`docs/sdk-issues.md`](docs/sdk-issues.md) for 19 tracked upstream issues and [`docs/known-gaps.md`](docs/known-gaps.md) for the remaining external-dependency items. |
+| **M5.2**  | partial    | apt / yum repos, Docker image — external infra (see [known-gaps #9](docs/known-gaps.md)) |
+| **M6**    | partial    | sigstore signing ✅; mdbook deploy + external case study — external (see [known-gaps #10 / #11](docs/known-gaps.md)) |
 
 ### M1 acceptance report
 

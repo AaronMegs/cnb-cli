@@ -1,5 +1,9 @@
 # Upstream issue drafts for the `cnb` SDK
 
+<!-- markdownlint-disable MD060 -->
+<!-- MD060: aligned-table widening hurts the at-a-glance navigation
+     these tables are designed for. -->
+
 Source-controlled drafts of the issues we plan to file against the
 upstream `cnb` crate (a.k.a. `cnb-sdk` in our workspace
 manifests; published by AaronMegs on crates.io as `cnb`).
@@ -7,6 +11,13 @@ manifests; published by AaronMegs on crates.io as `cnb`).
 These are **drafts** — meant to be copy-pasted into the upstream
 issue tracker once Phase 2 of the cnb-cli typed-SDK migration is
 complete.
+
+## 中文整合版（推荐给上游使用）
+
+[`SDK-反馈汇总.md`](./SDK-反馈汇总.md) 把全部 19 个问题、A/B/C 三级
+分组、提单顺序、复现锚点和待外部决定事项整合到一份单文件，使用中文
+撰写，便于直接转发给上游维护者，也便于后续自查。下面的英文 minimal
+repro 文件作为它的附件保留，提供独立可贴的代码片段。
 
 ## Tier A — file as standalone issues
 
@@ -36,11 +47,16 @@ reference the `cnb` (CLI) commit they were observed in. The five
 drafts here cover all the workarounds present in the tree at
 `b785d35` (`sdk(step-2.11)`).
 
-## Tier B / Tier C
+## Tier B / Tier C — file as one consolidated issue each
 
-Tier B (DTO-completeness bundle, six items) and Tier C (housekeeping
-meta-issue, eight items) are summarised in
-[`../sdk-issues.md`](../sdk-issues.md) §75–105. They are not
-drafted as standalone files yet — they are intentionally reported
-as one consolidated issue each, so the maintainer can triage them
-as a group.
+Tier B and Tier C are intentionally reported as **one issue
+each**, not item-by-item, so the maintainer can triage related
+fixes as a group.
+
+| File                           | Tier   | One-line pitch                                                                                  |
+|--------------------------------|--------|-------------------------------------------------------------------------------------------------|
+| [`Tier-B.md`](./Tier-B.md)     | Tier B | DTO completeness & method-signature consistency (6 sub-items: SDK-I01 / I02 / I08 / I11 / I13 / I19) |
+| [`Tier-C.md`](./Tier-C.md)     | Tier C | Polish & conventions meta-issue (8 sub-items: SDK-I04 / I05 / I06 / I10 / I12 / I16 / I17 / I18)     |
+
+Both files cross-link back to [`../sdk-issues.md`](../sdk-issues.md)
+for the longer-form context.

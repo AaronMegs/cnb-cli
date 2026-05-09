@@ -1,5 +1,9 @@
 # SDK issues log
 
+> **Open-item dashboard**: for the project-wide list of items that are
+> blocked on external dependencies (this file is just the SDK slice),
+> see [`known-gaps.md`](./known-gaps.md).
+
 Running tally of friction points encountered while porting `cnb-cli`
 commands to the external `cnb` crate (aliased as `cnb-sdk` in our
 workspace manifests, published by AaronMegs on crates.io).
@@ -74,11 +78,22 @@ group.
 
 ### Upstream-report rollout plan
 
+> **TL;DR**: A single Chinese-language consolidated report is now
+> ready at [`upstream-issues/SDK-反馈汇总.md`](./upstream-issues/SDK-反馈汇总.md).
+> It bundles all 19 issues, the A/B/C tiering, the suggested filing
+> order, and a per-file workaround anchor table — recommended as
+> the primary artefact to share with the maintainer. The English
+> minimal-repro files in the same directory remain as attachments
+> with copy-pasteable code snippets.
+
 1. **Phase 2 is now functionally complete.** As of step 2.11 the
    only cnb-api residue in `cnb-cli` is:
-   - `cnb auth login/status` token validation (`users::get_self`)
-     — Phase 1 hold-over, deliberately unchanged to keep the
-     pre-auth HTTP path simple.
+   - ~~`cnb auth login/status` token validation (`users::get_self`)~~
+     **Resolved in the post-Phase-2 `users::get_self` follow-up**
+     — `cnb auth login` and `cnb auth status` now call the typed
+     `cnb_sdk::users::UsersClient::get_user_info()` via a new
+     `Context::sdk_with_token(token)` one-shot builder. The
+     `cnb-api::services::users` module was deleted.
    - `cnb issue create --attach` and `cnb issue comment --attach`
      attachment uploads (`services::uploads`) — same JSON-only
      transport blocker as SDK-I14, scoped out of step 2.11.
@@ -86,9 +101,9 @@ group.
      SDK's JSON-only transport (see SDK-I14).
 
    The `cnb-api::services::{builds,issues,labels,missions,orgs,pulls,
-   registries,releases,repo_extras,repos,workspaces}` modules have
-   all been deleted. The crate is now ~90% smaller and only carries
-   `Client` + `tracing_layer` + `users::get_self` + `uploads`.
+   registries,releases,repo_extras,repos,users,workspaces}` modules
+   have all been deleted. The crate is now ~92% smaller and only
+   carries `Client` + `tracing_layer` + `uploads`.
 2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.
@@ -102,8 +117,17 @@ group.
    titled something like *"DTO completeness & method-signature
    consistency during the cnb-cli port"*, linking to specific commits
    per sub-case.
+   *Draft ready in [`upstream-issues/Tier-B.md`](./upstream-issues/Tier-B.md)
+   covering SDK-I01 / I02 / I08 / I11 / I13 / I19, with a suggested
+   landing order for a single "DTO polish PR" if the maintainer
+   wants one.*
 4. File the **Tier C meta-issue** last — list the eight sub-items
    with a one-paragraph justification each; no reproducer required.
+   *Draft ready in [`upstream-issues/Tier-C.md`](./upstream-issues/Tier-C.md)
+   covering SDK-I04 / I05 / I06 / I10 / I12 / I16 / I17 / I18,
+   organised into 6 subgroups (publishing metadata, generated-code
+   conventions, defensive defaults, spec/server alignment, query
+   completeness, missing verbs).*
 5. Offer a patch PR for whatever looks least controversial (I04
    rename, I05 `#[non_exhaustive]`, I06 URL fix are all safe
    starting points). SDK-I18 (pinned-repos PUT) is also a clean

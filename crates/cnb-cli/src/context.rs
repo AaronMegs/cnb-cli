@@ -83,13 +83,13 @@ impl Context {
         Ok(self.api.as_ref().expect("just inserted"))
     }
 
-    /// Build an API client with no token (for `auth login`'s validation step,
-    /// where the token isn't yet stored).
-    pub fn api_with_token(&self, token: &str) -> Result<Client, CliError> {
-        Ok(Client::builder().token(token).build()?)
-    }
-
     /// Build (or reuse) the typed SDK client (`cnb` crate / `cnb-sdk`).
+    ///
+    /// The previous `api_with_token(token)` helper (last caller: `auth
+    /// login/status`) has been removed together with its callers — see
+    /// [`Context::sdk_with_token`] for the typed-SDK replacement. `api()`
+    /// (no suffix) stays because `cnb api` raw passthrough still depends
+    /// on `cnb_api::Client` (SDK-I14 JSON-only transport gap).
     ///
     /// Phase 1 of the cnb-api → SDK migration. Token resolution keeps the
     /// project's three-tier contract (env > keyring > file) by running
@@ -133,6 +133,33 @@ impl Context {
         // the next `sdk()` call. Cheap: `ApiClient` is just `Arc`s under the
         // hood, so there's no real teardown cost.
         self.sdk = None;
+    }
+
+    /// Build a **one-shot** SDK client using an explicit token, bypassing
+    /// the usual env > keyring > file resolution.
+    ///
+    /// Used by `cnb auth login` to validate a freshly-pasted token before
+    /// it is persisted — at that point `resolve_token` would return
+    /// `NotLoggedIn`. Also used by `cnb auth status` when it wants to
+    /// re-validate against a specific token source rather than re-derive
+    /// through the resolver.
+    ///
+    /// The base URL honours the same precedence as [`Context::sdk`]:
+    /// explicit override (tests) > `CNB_API_BASE` env (wiremock) >
+    /// SDK default. The returned client is **not** cached: callers that
+    /// need the shared SDK instance should use [`Context::sdk`] instead.
+    pub fn sdk_with_token(&self, token: &str) -> Result<cnb_sdk::ApiClient, CliError> {
+        let mut builder = cnb_sdk::ApiClient::builder()
+            .token(token.to_owned())
+            .user_agent(concat!("cnb/", env!("CARGO_PKG_VERSION")));
+        let base_override = self
+            .sdk_base_url
+            .clone()
+            .or_else(|| std::env::var("CNB_API_BASE").ok().filter(|v| !v.is_empty()));
+        if let Some(base) = base_override {
+            builder = builder.base_url(base);
+        }
+        builder.build().map_err(CliError::from)
     }
 
     /// Resolve the base URL that the SDK client will actually use. Mirrors

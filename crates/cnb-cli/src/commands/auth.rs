@@ -100,12 +100,19 @@ async fn login(ctx: &mut Context, args: LoginArgs) -> Result<(), CliError> {
             .map_err(|e| CliError::Generic(e.to_string()))?
     };
 
-    // Validate against /user.
-    let probe = ctx.api_with_token(&token)?;
-    let user = cnb_api::services::users::get_self(&probe).await?;
+    // Validate against /user via the typed SDK. The SDK's `UsersResult`
+    // DTO types `username` as `Option<String>`, so we extract it
+    // defensively — a `GET /user` response without a username would be
+    // a server-side contract violation, not an auth failure.
+    let probe = ctx.sdk_with_token(&token)?;
+    let user = probe.users().get_user_info().await?;
+    let username = user
+        .username
+        .as_deref()
+        .ok_or_else(|| CliError::Generic("`/user` response omitted `username`".into()))?;
 
     let svc = ctx.auth_service();
-    let record = svc.login(&ctx.host, &user.username, &token, &args.git_protocol)?;
+    let record = svc.login(&ctx.host, username, &token, &args.git_protocol)?;
 
     let where_stored = if record.stored_in_keyring {
         "system keyring"
@@ -141,10 +148,12 @@ async fn status(ctx: &mut Context, args: StatusArgs) -> Result<(), CliError> {
     let svc = ctx.auth_service();
     let st = svc.status(&ctx.host, None)?;
 
-    // Optionally re-validate by hitting /user.
+    // Optionally re-validate by hitting /user via the typed SDK. We
+    // only care about the request-level success/failure; the response
+    // body isn't displayed here.
     let token = svc.token(&ctx.host, None)?;
-    let probe = ctx.api_with_token(&token)?;
-    let user_check = cnb_api::services::users::get_self(&probe).await;
+    let probe = ctx.sdk_with_token(&token)?;
+    let user_check = probe.users().get_user_info().await;
 
     let source = match &st.source {
         TokenSource::Env => "env (CNB_TOKEN)".to_owned(),

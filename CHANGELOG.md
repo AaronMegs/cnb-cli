@@ -7,6 +7,87 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Changed (post-Phase-2 · `users::get_self` ported to the typed SDK)
+
+- **`cnb auth login` + `cnb auth status` token validation now flows
+  through the typed SDK.** The Phase 1 hold-over that kept
+  `cnb_api::services::users::get_self` alive for the pre-auth
+  validation path has been retired. Both verbs now call
+  `cnb_sdk::users::UsersClient::get_user_info()` through a new
+  `Context::sdk_with_token(token)` helper, which builds a one-shot
+  `cnb_sdk::ApiClient` with an explicit token (bypassing the
+  env > keyring > file resolver that doesn't yet apply during
+  `login`). Base-URL precedence (explicit override >
+  `CNB_API_BASE` > SDK default) and the `User-Agent` string match
+  the shared `Context::sdk()` code path, so wiremock fixtures
+  continue to work unchanged.
+- **`Repos4User`-like defensive extraction for `username`**: the
+  SDK's `UsersResult` types `username` as `Option<String>` (vs.
+  the cnb-api `User.username: String`). `login` now surfaces a
+  `CliError::Generic("\`/user\` response omitted \`username\`")` on
+  the unlikely server-side contract violation rather than panic.
+- **Removed**:
+  - `crates/cnb-api/src/services/users.rs` (module + `get_self`
+    + `User` DTO + its wiremock unit test).
+  - `services::users` from `cnb_api::services::mod`.
+  - `Context::api_with_token` — had a single remaining caller
+    (`auth login`), both the caller and the helper are gone.
+- **Updated documentation**:
+  - `cnb-api/src/lib.rs` + `services/mod.rs` crate docs now list
+    only `uploads` as the remaining facade.
+  - `docs/sdk-issues.md` rollout plan: "`users::get_self` Phase 1
+    hold-over" struck through, replaced by a "Resolved" note.
+- **Impact on cnb-api surface**: the crate now carries just
+  `Client` + `tracing_layer` + `services::uploads`. Estimated
+  size reduction vs. the Phase 2 state: one more facade module
+  gone (~54 lines + test), leaving `uploads` as the **sole**
+  residue — and it is blocked entirely on SDK-I14.
+
+### Changed (platform docs · Windows ACL follow-up clarified)
+
+- `cnb-config::atomic_write::set_secure_permissions` on non-Unix
+  platforms: the `TODO(M5)` comment has been replaced with a
+  concrete note explaining why the default NTFS per-user profile
+  ACLs already give us most of the `0600` guarantee and why the
+  explicit `windows-sys` DACL-rewrite path is scoped out of the
+  cross-platform MVP. No behaviour change — the function still
+  returns `Ok(())` on non-Unix — but the rationale is now in the
+  source rather than in someone's head.
+
+### Added (project-wide open-item dashboard)
+
+- **[`docs/known-gaps.md`](./docs/known-gaps.md)** · a single page
+  that lists every open item currently **blocked on external
+  dependencies**, so someone picking up the project can see the
+  boundary at a glance rather than piecing it together from
+  `DESIGN.md` §16 + `sdk-issues.md` + README milestone table.
+  Covers 15 items across 5 categories:
+  - **Upstream SDK feedback chain** (#1–#4): mirror URL still
+    pending, which blocks publishing the 5 Tier A standalone
+    issues, the Tier B / Tier C bundled issues, and the 4
+    patch-ready PRs (SDK-I04/05/06/18).
+  - **Upstream SDK fixes** (#5–#8): SDK-I14 non-JSON transport
+    is the biggest lever — it blocks four consumer flows
+    (`release upload/download`, `build logs`, `issue --attach`)
+    and the final retirement of `cnb-api::services::uploads`.
+    SDK-I12 / SDK-I16 are server-team clarification items.
+  - **Release / infra** (#9–#11): apt / yum / Docker registry
+    infrastructure, mdbook hosting target, external case study.
+  - **Long-running spec / server uncertainty** (#12–#14):
+    DESIGN §16 items #1 / #6 / #7 (OAuth Device Flow, registry
+    type enum, error-code dictionary).
+  - **Platform trade-offs** (#15): Windows ACL hardening is a
+    deliberate scope-out, not a forgotten TODO.
+
+  Each entry specifies: current state, blocking reason, impact
+  surface, resolution condition, suggested owner. README's
+  "Documentation" section and the top of `sdk-issues.md` now
+  point at this dashboard as the authoritative open-item view.
+- **README milestone table refreshed**: SDK-2 status is now the
+  post-`users::get_self`-port wording (twelve facades deleted,
+  only `uploads` remains); `M5.2` / `M6` partial rows link
+  directly into `known-gaps.md` entries.
+
 ### Added (cnb-api → typed SDK migration, Phase 2 step 2.11 — Phase 2 done)
 
 - **`cnb issue` write paths ported to the typed SDK**
@@ -90,9 +171,34 @@ silently drop the user's intent:
   observed wire shapes, the cnb-cli workaround, and a
   prioritised suggested fix. Anchored to commit `b785d35`
   (Phase 2 step 2.11). README in the same directory routes the
-  reader. Tier B / Tier C still live as the consolidated entries
-  in `sdk-issues.md`; will be drafted as standalone files only if
-  the upstream maintainer asks for them in that form.
+  reader.
+- **Tier B and Tier C consolidated drafts written**
+  ([`docs/upstream-issues/Tier-B.md`](./docs/upstream-issues/Tier-B.md),
+  [`docs/upstream-issues/Tier-C.md`](./docs/upstream-issues/Tier-C.md)).
+  - Tier B — *"DTO completeness & method-signature consistency
+    during the cnb-cli port"* — bundles SDK-I01 / I02 / I08 /
+    I11 / I13 / I19. Closes with a suggested landing order if the
+    maintainer wants a single "DTO polish PR".
+  - Tier C — *"Polish & conventions"* meta-issue — bundles
+    SDK-I04 / I05 / I06 / I10 / I12 / I16 / I17 / I18 organised
+    into 6 subgroups (publishing metadata; generated-code
+    conventions; defensive defaults; spec/server alignment;
+    query completeness; missing verbs). Flags four "patch-ready"
+    items that we can offer PRs for once the upstream mirror URL
+    is confirmed (SDK-I06).
+- **Chinese-language consolidated upstream report**
+  ([`docs/upstream-issues/SDK-反馈汇总.md`](./docs/upstream-issues/SDK-反馈汇总.md)).
+  All 19 SDK issues, the A/B/C tiering, the filing-order
+  recommendation, full workaround / suggested-fix detail per item,
+  and a workaround-anchor table mapping every issue to a concrete
+  file:line in cnb-cli — packaged into one document for direct
+  hand-off to the SDK maintainer (and for our own review). The
+  English minimal-repro files (`SDK-I03.md` / `I07` / `I09` / `I14` /
+  `I15` / `Tier-B` / `Tier-C`) stay as attachments with
+  copy-pasteable code snippets.
+  All three rollout-plan drafts are now done. Remaining work is
+  external: pick the canonical cnb-cli mirror URL, sed the
+  `https://…` placeholders, and post the issues / PRs upstream.
 
 ### Phase 2 — done
 
