@@ -57,18 +57,28 @@ pub struct SearchArgs {
 }
 
 pub async fn run(ctx: &mut Context, args: SearchArgs) -> Result<(), CliError> {
-    // Build the SDK query. `--desc` is a CLI-ergonomic alias for the
-    // underlying `desc: Option<bool>` field — we only set `Some(true)` when
-    // the user explicitly asks, so the default (server-controlled) order is
-    // preserved when the flag is absent.
-    let query = ListPublicReposQuery {
-        key: args.key.clone(),
-        flags: args.flags.clone(),
-        flags_match: args.flags_match.clone(),
-        order_by: args.order_by.clone(),
-        desc: if args.desc { Some(true) } else { None },
-        top_n: args.top_n,
-    };
+    // SDK 0.2.2 marked `ListPublicReposQuery` as `#[non_exhaustive]`, so
+    // direct struct init no longer compiles. Use the builder chain — same
+    // semantics, future-proof against new optional fields.
+    let mut query = ListPublicReposQuery::new();
+    if let Some(v) = args.key.clone() {
+        query = query.key(v);
+    }
+    if let Some(v) = args.flags.clone() {
+        query = query.flags(v);
+    }
+    if let Some(v) = args.flags_match.clone() {
+        query = query.flags_match(v);
+    }
+    if let Some(v) = args.order_by.clone() {
+        query = query.order_by(v);
+    }
+    if args.desc {
+        query = query.desc(true);
+    }
+    if let Some(v) = args.top_n {
+        query = query.top_n(v);
+    }
 
     let client = ctx.sdk()?;
     let hits = client.search().list_public_repos(&query).await?;

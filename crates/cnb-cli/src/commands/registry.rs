@@ -366,40 +366,28 @@ async fn pkg_delete(ctx: &mut Context, args: PackageDeleteArgs) -> Result<(), Cl
     Ok(())
 }
 
-/// `registry tag list` — bypasses the SDK's typed call because
-/// `list_package_tags` returns `models::Tag` (a single-object git-tag
-/// DTO), not the `Vec<TagSummary>`-shaped response the server actually
-/// emits. We go straight to the wire via `sdk_raw_get` and render as
-/// raw JSON. Tracked as SDK-I15.
+/// `registry tag list` — uses the typed SDK call. Resolved upstream in
+/// cnb 0.2.2 (SDK-I15): `list_package_tags` now returns
+/// `Vec<RegistryPackageTag>` instead of the mis-typed git-tag DTO, so
+/// we no longer need the `sdk_raw_get` double-request workaround.
 async fn tag_list(ctx: &mut Context, args: PackageRefArgs) -> Result<(), CliError> {
     validate_kind(&args.kind)?;
-    // Still run the typed call to exercise the SDK's request path
-    // (base URL / auth / retries / tracing). Its return value is
-    // discarded — shape mismatch means we cannot read it safely.
-    let _touch: cnb_sdk::models::Tag = {
+    let items = {
         let q = ListPackageTagsQuery::new();
         let client = ctx.sdk()?;
         client
             .registries()
             .list_package_tags(args.slug.clone(), args.kind.clone(), args.name.clone(), &q)
-            .await
-            .unwrap_or_default()
+            .await?
     };
-    let v = ctx
-        .sdk_raw_get(&format!("/{}/-/packages/{}/{}/-/tags", args.slug, args.kind, args.name))
-        .await?;
+    let v = serde_json::to_value(&items).map_err(|e| CliError::Generic(format!("serialise tag list: {e}")))?;
     if render(ctx, &args.out, &v)? {
         return Ok(());
     }
-    let items = v.as_array().cloned().unwrap_or_default();
     let mut rows = Vec::with_capacity(items.len());
     for it in &items {
-        let tag = it
-            .get("name")
-            .or_else(|| it.get("tag"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let updated = it.get("updated_at").and_then(Value::as_str).unwrap_or("");
+        let tag = it.name.as_deref().unwrap_or("");
+        let updated = it.updated_at.as_deref().unwrap_or("");
         rows.push(vec![tag.to_owned(), updated.to_owned()]);
     }
     let mut stdout = std::io::stdout().lock();

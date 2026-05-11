@@ -690,9 +690,7 @@ async fn batch(ctx: &mut Context, args: BatchArgs) -> Result<(), CliError> {
     if args.numbers.is_empty() {
         return Err(CliError::BadArgs("pass at least one PR number".into()));
     }
-    let q = ListPullsByNumbersQuery {
-        n: Some(args.numbers.iter().map(|n| n.to_string()).collect()),
-    };
+    let q = ListPullsByNumbersQuery::new().n(args.numbers.iter().map(ToString::to_string).collect::<Vec<_>>());
     let items = {
         let client = ctx.sdk()?;
         client.pulls().list_pulls_by_numbers(repo, &q).await?

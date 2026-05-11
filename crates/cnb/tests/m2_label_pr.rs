@@ -177,8 +177,8 @@ async fn pr_view_renders_branch_arrow() {
             "number": "7",
             "title": "feat: shiny",
             "state": "open",
-            "head": {"branch": "feat/shiny"},
-            "base": {"branch": "main"},
+            "head": {"ref": "feat/shiny"},
+            "base": {"ref": "main"},
             "body": "Adds the shiny widget."
         })))
         .mount(&server)
@@ -227,7 +227,7 @@ async fn mr_alias_resolves_to_pr() {
         .and(path("/cnb/feedback/-/pulls/1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "number": "1", "title": "hi", "state": "open",
-            "head": {"branch": "f"}, "base": {"branch": "main"}
+            "head": {"ref": "f"}, "base": {"ref": "main"}
         })))
         .mount(&server)
         .await;

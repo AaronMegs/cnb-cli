@@ -280,24 +280,30 @@ pub async fn run(ctx: &mut Context, args: RepoArgs) -> Result<(), CliError> {
 
 /// Render the `visibility_level` field of a repo DTO as a human string.
 ///
-/// The upstream spec types `visibility_level` as a **string alias** (see
-/// `cnb_sdk::models::Visibility`), so the SDK-typed code paths already get
-/// `"public"` / `"internal"` / `"private"` verbatim. This helper is kept as
-/// a defensive formatter that also tolerates the legacy integer encoding
-/// (`0` / `10` / `20`) some older servers still emit — we transparently
-/// coerce integers to the canonical string form.
+/// SDK 0.2.2 (per `docs/sdk-issues.md` SDK-I03) made `Visibility` a real
+/// enum with canonical wire variants `"Public"` / `"Private"` / `"Secret"`
+/// and a custom `Deserialize` that also accepts lowercase strings,
+/// the legacy `"Internal"` synonym (mapped to `Secret`), and the
+/// historical integer encoding (`0` / `10` / `20`).
+///
+/// This helper preserves user-facing output identical to the SDK's
+/// canonical capitalisation so `cnb repo view --json | jq` round-trips
+/// the wire form. Unknown / missing values render as `?`.
 fn format_visibility(raw: Option<&Value>) -> &'static str {
     match raw {
         Some(Value::String(s)) => match s.as_str() {
-            "public" => "public",
-            "internal" => "internal",
-            "private" => "private",
+            "Public" | "public" => "Public",
+            "Private" | "private" => "Private",
+            // The SDK collapses "Internal" into "Secret" — we follow that
+            // mapping so the CLI agrees with what `cnb_sdk::models::Visibility`
+            // would deserialise the same string into.
+            "Secret" | "secret" | "Internal" | "internal" => "Secret",
             _ => "?",
         },
         Some(Value::Number(n)) => match n.as_i64() {
-            Some(0) => "public",
-            Some(10) => "internal",
-            Some(20) => "private",
+            Some(0) => "Public",
+            Some(10) => "Secret",
+            Some(20) => "Private",
             _ => "?",
         },
         _ => "?",
@@ -603,9 +609,7 @@ async fn set_visibility(ctx: &mut Context, args: SetVisibilityArgs) -> Result<()
     // JSON body `{visibility_level: 0|10|20}`. We follow the SDK on the
     // assumption it tracks the OpenAPI spec; if the server rejects the
     // query form, bump SDK-I12 to blocker.
-    let q = SetRepoVisibilityQuery {
-        visibility: Some(args.visibility.clone()),
-    };
+    let q = SetRepoVisibilityQuery::new().visibility(args.visibility.clone());
     let client = ctx.sdk()?;
     let _ = client.repositories().set_repo_visibility(repo.clone(), &q).await?;
     eprintln!("✓ {repo}: visibility set to {}", args.visibility);
@@ -712,17 +716,26 @@ mod tests {
 
     #[test]
     fn format_visibility_accepts_strings() {
-        assert_eq!(format_visibility(Some(&json!("public"))), "public");
-        assert_eq!(format_visibility(Some(&json!("internal"))), "internal");
-        assert_eq!(format_visibility(Some(&json!("private"))), "private");
+        // Canonical wire form (SDK 0.2.2 default).
+        assert_eq!(format_visibility(Some(&json!("Public"))), "Public");
+        assert_eq!(format_visibility(Some(&json!("Private"))), "Private");
+        assert_eq!(format_visibility(Some(&json!("Secret"))), "Secret");
+        // Lowercase + legacy `Internal` → still understood, normalised to
+        // canonical capitalisation on output.
+        assert_eq!(format_visibility(Some(&json!("public"))), "Public");
+        assert_eq!(format_visibility(Some(&json!("private"))), "Private");
+        assert_eq!(format_visibility(Some(&json!("internal"))), "Secret");
+        assert_eq!(format_visibility(Some(&json!("Internal"))), "Secret");
         assert_eq!(format_visibility(Some(&json!("weird"))), "?");
     }
 
     #[test]
     fn format_visibility_tolerates_legacy_integer_encoding() {
-        assert_eq!(format_visibility(Some(&json!(0))), "public");
-        assert_eq!(format_visibility(Some(&json!(10))), "internal");
-        assert_eq!(format_visibility(Some(&json!(20))), "private");
+        assert_eq!(format_visibility(Some(&json!(0))), "Public");
+        // SDK 0.2.2 maps the integer `10` (legacy "internal") onto
+        // `Visibility::Secret`. We follow that.
+        assert_eq!(format_visibility(Some(&json!(10))), "Secret");
+        assert_eq!(format_visibility(Some(&json!(20))), "Private");
         assert_eq!(format_visibility(Some(&json!(99))), "?");
     }
 

@@ -36,7 +36,11 @@ async fn repo_view_default_card_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cnb/feedback"))
-        .stdout(predicate::str::contains("Visibility:    public"))
+        // SDK 0.2.2's `Visibility` is a real enum with canonical wire form
+        // `"Public"` / `"Private"` / `"Secret"`. `format_visibility` now
+        // normalises lowercase / legacy "Internal" / integer encodings onto
+        // those capitalised strings so the CLI agrees with the SDK.
+        .stdout(predicate::str::contains("Visibility:    Public"))
         .stdout(predicate::str::contains("Default branch: main"))
         .stdout(predicate::str::contains("the official feedback repo"));
 }
@@ -92,7 +96,9 @@ async fn repo_list_user_emits_tsv_when_piped() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "got: {stdout:?}");
     assert!(lines[0].starts_with("alice/first\t"));
-    assert!(lines[1].contains("alice/second\tstuff\tprivate\t2026-01-03"));
+    // SDK 0.2.2 canonical Visibility capitalisation; see m2_repo.rs comment
+    // on the view test for context.
+    assert!(lines[1].contains("alice/second\tstuff\tPrivate\t2026-01-03"));
 }
 
 #[tokio::test]

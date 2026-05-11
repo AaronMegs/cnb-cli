@@ -69,7 +69,9 @@ async fn search_default_renders_table() {
         // command). Assert on the data rows instead.
         .stdout(predicate::str::contains("cnb/feedback"))
         .stdout(predicate::str::contains("cnb/cli"))
-        .stdout(predicate::str::contains("public"));
+        // SDK 0.2.2 canonical Visibility capitalisation; see m2_repo.rs
+        // for the full discussion.
+        .stdout(predicate::str::contains("Public"));
 }
 
 #[tokio::test]
