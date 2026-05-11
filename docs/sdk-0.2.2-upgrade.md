@@ -6,8 +6,8 @@
      reads naturally and avoids visual stutter. -->
 
 > **范围**：把工作区从 `cnb 0.2.1` 升到 `cnb 0.2.2`（2026-05-09 发布），逐项核对 [`docs/sdk-issues.md`](./sdk-issues.md) / [`docs/upstream-issues/SDK-反馈汇总.md`](./upstream-issues/SDK-反馈汇总.md) 中 19 项 SDK 痛点的修复落地情况。
-> **执行日期**：2026-05-11。
-> **结论先行**：**19 项中 9 项已在 0.2.2 中解决**（其中 4 项是我们 Tier A 报告里的 blocker / blocker-邻），剩余 10 项分为"未变化（待后续版本）"和"需服务端确认"两类。CLI 侧已完成兼容性迁移，**`cargo fmt` / `cargo clippy -D warnings` / `cargo test` 全绿（200 tests passed）**。
+> **执行日期**：2026-05-11（升级 + 兼容迁移）；同日完成全部 §3 follow-up cleanup + cnb-api crate 退役（Phase 2 真正意义上的完结）。
+> **结论先行**：**19 项中 9 项已在 0.2.2 中解决**（其中 4 项是我们 Tier A 报告里的 blocker / blocker-邻），剩余 10 项分为"未变化（待后续版本）"和"需服务端确认"两类。CLI 侧已完成兼容性迁移 + 三项 follow-up cleanup + cnb-api 整体退役（workspace 7 → 6 crates）；**`cargo fmt` / `cargo clippy -D warnings` / `cargo test` 全绿（200 tests passed），`mdbook build` 干净通过（21 HTML / 2.4 MB / 0 warning）**。
 
 ---
 
@@ -93,10 +93,15 @@ SDK 0.2.2 的 wire 形态变化触发了 3 个测试失败，全部是 fixture �
 - `cnb search` 的输出同上
 - `--json` / `--jq` / `--template` 直接走 raw `Value` passthrough，**不受影响**（fixture 发什么就显示什么）
 
-### 1.5 暂未发力的修复点
+### 1.5 暂未发力的修复点 — ✅ 已发力
 
-- **SDK-I01 已修**：理论上 `Context::sdk_raw_get` 可以直接用 `client.http().url(path)` 替代它自己的 base URL 拼接逻辑。**未做改动**——既有实现已经 work，且只是质量优化、不修复任何 bug。可作为后续小 cleanup。
-- **SDK-I14 已修**：`HttpInner::reqwest_client()` 现在 `pub`，理论上 `release upload phase 2` / `release download` / `build logs` / `issue --attach` 四个 side-car `reqwest::Client::new()` 都能改为复用 SDK 的连接池。**未做改动**——这是 4 个独立 flow 的实质性 refactor（涉及 token 重用、auth header、error mapping 对齐），值得单独一个 commit。建议作为下一步 follow-up 工作。详见本文件 §3.1。
+- **SDK-I01 已修**：`Context::sdk_raw_get` / `sdk_raw_json` /
+  `sdk_raw_get_bytes` 三个 helper 已改用 `client.http().url(path)`
+  替代各自的 base URL 拼接逻辑。详见 §3.3。
+- **SDK-I14 已修**：4 个 side-car `reqwest::Client::new()` 中的 3 个
+  已改为复用 SDK 共享 reqwest，1 个（`release upload phase 2`）因
+  pre-signed URL 不应带 auth header 故意保留独立 client。详见 §3.1。
+  `cnb-api::services::uploads` 也随之退役（详见 §6）。
 
 ---
 
@@ -225,14 +230,17 @@ pub async fn set_repo_visibility(
 
 完全实现了我们 [`SDK-I14.md`](./upstream-issues/SDK-I14.md) 推荐的 "Option A"。
 
-**潜在的下一步 cleanup**（暂未做）：把 4 个 side-car `reqwest::Client::new()` 替换为 `ctx.sdk()?.http().reqwest_client()`：
+**下一步 cleanup — ✅ 已完成**：4 个 side-car `reqwest::Client::new()`
+中的 3 个已替换为 SDK 共享 reqwest，1 个故意保留：
 
-- `commands/release.rs:482` — release upload phase 2
-- `commands/release.rs:541` — release download
-- `commands/build.rs:423` — build logs download
-- `cnb-api::services::uploads` — `cnb issue create --attach` / `comment --attach`
+- `commands/release.rs:482` — release upload phase 2 · ✅ **故意保留独立 client**
+  （pre-signed URL 不应带 `Authorization` header）
+- `commands/release.rs:541` — release download · ✅ 已切到 `Context::sdk_raw_get_bytes`
+- `commands/build.rs:423` — build logs download · ✅ 已切到 `Context::sdk_raw_get_bytes`
+- `cnb-api::services::uploads` — `cnb issue create --attach` / `comment --attach` ·
+  ✅ 已迁移到 `cnb-cli::http::uploads`，使用 `client.http().reqwest_client()` 发 multipart POST
 
-最后一项做完后，**整个 `cnb-api` crate 可以彻底删除**。详见 §3.1。
+最后一项做完后，**整个 `cnb-api` crate 已经彻底删除**。详见 §6。
 
 ### 2.15 ✅ SDK-I15 · `list_package_tags` 类型修正
 
@@ -287,27 +295,46 @@ pub async fn set_pinned_repo_by_group(
 
 ---
 
-## 3. 后续可立即做的 cleanup（非必需）
+## 3. 后续可立即做的 cleanup（**全部已落地**）
 
-### 3.1 把 4 个 side-car reqwest 收编进 SDK 客户端（SDK-I14 已修复后）
+以下三项原本作为 0.2.2 升级后的可选 follow-up 列出，截至本报告
+更新时（commit `b764866` + `9547335`）**已全部完成**。
 
-**收益**：连接池 / retry / auth header / tracing 全部对齐 SDK，并能彻底删除 `cnb-api::services::uploads`，让整个 `cnb-api` crate 退役。
+### 3.1 把 4 个 side-car reqwest 收编进 SDK 客户端 — ✅ 已完成
 
-**成本**：4 处独立 flow 的 refactor，其中 `--attach` 的两阶段上传逻辑最复杂。建议作为一个独立 commit（类似 `users::get_self` port）。
+**完成形态**（不是当时设想的"4 处都改"，而是分两步收尾）：
 
-**优先级**：低（功能已 work，纯架构清理）。
+- **3 处**改为复用 SDK 共享 reqwest（`commands/release.rs:download` /
+  `commands/build.rs:logs` / `services::uploads`）：通过
+  `Context::sdk_raw_get_bytes(path)` 或直接
+  `client.http().reqwest_client()` 发请求，保留 SDK 的 auth header /
+  base URL / 连接池。**两处 `std::env::var("CNB_TOKEN")` env 兜底
+  也一并删除**（SDK 已经在 default headers 里附带 bearer token）。
+- **1 处**故意保留独立 `reqwest::Client::new()`：`commands/release.rs`
+  的 release upload phase 2 是 pre-signed URL，**不应**带
+  `Authorization` header（SDK reqwest 永远附 bearer，行为相反）。
+  这是设计取舍，源码里有注释说明。
 
-### 3.2 把 `cnb repo pin` / `unpin` 切到 typed `set_pinned_repo_by_group`
+**附带收益**：这一步完成后 `cnb-api::services::uploads` 可以彻底
+退役（见 §6）。
 
-**收益**：少一处 `sdk_raw_json` workaround；返回类型 `Vec<Repos4UserBase>` 比 `serde_json::Value` 更可读。
+### 3.2 `cnb repo pin` / `unpin` 切到 typed `set_pinned_repo_by_group` — ✅ 已完成
 
-**成本**：~10 行改动，wiremock 测试需对齐响应 shape。
+`Context::sdk_raw_json(PUT, …)` workaround 替换为
+`client.repositories().set_pinned_repo_by_group(slug, &Vec<String>)`。
 
-### 3.3 把 `Context::sdk_raw_get` / `sdk_raw_json` 改用 SDK 暴露的 `http().url(path)`
+**wire 形态变化**：body 从 `{"repos":[…]}` 包封变成裸 JSON 数组
+`[…]`（跟随 SDK，假定它对齐 OpenAPI spec）。wiremock fixture 同步
+更新（`body_partial_json` → `body_json`，response 从 `{}` 改为 `[]`）。
+如果真服务端拒绝裸数组，那是新 SDK-I20，但 SDK 0.2.2 CHANGELOG 里
+没有 spec 偏差的免责，我们直接相信生成代码。
 
-**收益**：消除 base URL 拼接重复实现（与 SDK 内部规则）。
+### 3.3 `Context::sdk_raw_*` 用 SDK URL builder — ✅ 已完成
 
-**成本**：~15 行改动，行为不变。
+三个 helper（`sdk_raw_get` / `sdk_raw_json` / `sdk_raw_get_bytes`）都
+把"trailing slash + `Url::join` + percent encoding"逻辑还给 SDK 的
+`client.http().url(path)`。内部 `effective_sdk_base_url` helper 删除
+（无其它 caller）。`context.rs` 净减 ~50 行。
 
 ---
 
