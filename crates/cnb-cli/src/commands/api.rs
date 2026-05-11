@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::context::Context;
 use crate::error::CliError;
+use crate::http::{passthrough, sensitive};
 
 #[derive(Debug, Args)]
 pub struct ApiArgs {
@@ -59,8 +60,7 @@ pub async fn run(ctx: &mut Context, args: ApiArgs) -> Result<(), CliError> {
     let method = pick_method(args.method.as_deref(), body.is_some())?;
     let headers = parse_headers(&args.headers)?;
 
-    let client = ctx.api()?;
-    let resp = client.request_passthrough(method, &args.path, body, &headers).await?;
+    let resp = passthrough::request(ctx, method, &args.path, body, &headers).await?;
 
     if args.include {
         println!("HTTP/1.1 {}", resp.status);
@@ -68,7 +68,7 @@ pub async fn run(ctx: &mut Context, args: ApiArgs) -> Result<(), CliError> {
             // Per DESIGN §6: never print sensitive headers verbatim. The server's
             // own response headers are not secrets; we still redact set-cookie and
             // anything that looks like a token to be safe.
-            let printed = if cnb_api::tracing_layer::is_sensitive(k) {
+            let printed = if sensitive::is_sensitive(k) {
                 "***".to_owned()
             } else {
                 v.clone()
@@ -81,7 +81,7 @@ pub async fn run(ctx: &mut Context, args: ApiArgs) -> Result<(), CliError> {
     if !resp.is_success() {
         // For consistent error mapping with the rest of the CLI, surface the
         // structured error here (unless --silent).
-        return Err(resp.into_error().into());
+        return Err(passthrough::into_error(resp));
     }
 
     if args.silent {

@@ -1,6 +1,5 @@
 //! Top-level CLI error type. Maps to process exit codes per DESIGN §12.
 
-use cnb_api::ApiError;
 use cnb_auth::AuthError;
 use cnb_config::ConfigError;
 use cnb_git::GitError;
@@ -8,13 +7,11 @@ use cnb_tty::TtyError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error(transparent)]
-    Api(#[from] ApiError),
-
-    /// Errors surfaced by the external typed SDK (`cnb` crate / `cnb-sdk`).
-    /// Kept as a distinct variant from [`Api`] during the migration so we
-    /// can map its richer envelope (`code` / `message` / `request_id`) to
-    /// the same exit codes without losing fidelity.
+    /// Errors surfaced by the external typed SDK (`cnb` crate /
+    /// `cnb-sdk`). The SDK envelope already carries `code` /
+    /// `message` / `request_id` and an HTTP `status()` accessor;
+    /// [`Self::exit_code`] inspects that to map onto the right shell
+    /// exit code without losing fidelity.
     #[error(transparent)]
     Sdk(#[from] cnb_sdk::ApiError),
 
@@ -48,6 +45,33 @@ pub enum CliError {
     #[error("cancelled by user")]
     Cancelled,
 
+    /// The server returned 401 (or `errcode=16`).
+    ///
+    /// Surfaced by `cnb api` when the SDK's typed call paths are not
+    /// involved. Same exit code (`4`) and same login hint as the
+    /// `Sdk(401)` variant so users get a uniform UX regardless of
+    /// which entry point hit the auth wall.
+    #[error("unauthorized: please run `cnb auth login`")]
+    Unauthorized,
+
+    /// The server returned 404 (or `errcode=5`).
+    #[error("not found")]
+    NotFound,
+
+    /// The server returned 429.
+    #[error("rate limited")]
+    RateLimited,
+
+    /// The server returned 5xx with a structured error envelope.
+    /// Carries the bits that integration tests assert on.
+    #[error("server error [{errcode}] {errmsg} (HTTP {http_status})")]
+    ServerError {
+        http_status: u16,
+        errcode: i64,
+        errmsg: String,
+        request_id: Option<String>,
+    },
+
     #[error("{0}")]
     Generic(String),
 }
@@ -56,16 +80,16 @@ impl CliError {
     /// Process exit code, per DESIGN §12.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Api(ApiError::Unauthorized) | Self::Auth(AuthError::NotLoggedIn | AuthError::NoUser(_)) => 4,
-            Self::Api(ApiError::NotFound) => 2,
+            Self::Unauthorized | Self::Auth(AuthError::NotLoggedIn | AuthError::NoUser(_)) => 4,
+            Self::NotFound => 2,
             // Code 8 covers both server-side rate limiting and user-declined
             // destructive prompts: in both cases the operation did not run and
             // a reasonable retry strategy is "wait and try again".
-            Self::Api(ApiError::RateLimited { .. }) | Self::Cancelled => 8,
-            Self::Api(ApiError::Api { http_status, .. }) if (500..600).contains(&u32::from(*http_status)) => 9,
-            // SDK error — mirror the `Api` arms by inspecting its HTTP status.
-            // `ApiError::status()` returns `Option<u16>`; non-HTTP variants
-            // (transport, URL parse, JSON) fall through to the generic `1`.
+            Self::RateLimited | Self::Cancelled => 8,
+            Self::ServerError { .. } => 9,
+            // SDK error — mirror the explicit arms by inspecting its HTTP
+            // status. `ApiError::status()` returns `Option<u16>`; non-HTTP
+            // variants (transport, URL parse, JSON) fall through to `1`.
             Self::Sdk(e) => match e.status() {
                 Some(401) => 4,
                 Some(404) => 2,

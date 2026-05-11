@@ -7,6 +7,52 @@ v1.0 is reached. Pre-1.0 releases may break in any minor bump.
 
 ## [Unreleased]
 
+### Removed (cnb-api crate retired — Phase 2 fully complete)
+
+- **`cnb-api` crate has been deleted from the workspace.** With the
+  cnb 0.2.2 upgrade landing the SDK-I14 / SDK-I01 fixes (public
+  `HttpInner::reqwest_client()` and `HttpInner::url()`), every shape
+  the local `cnb-api` crate used to wrap is now reachable through
+  the typed SDK's shared HTTP plumbing. The two remaining
+  consumer-side flows that still need raw HTTP — `cnb api …` and the
+  `cnb issue --attach` multipart upload — have been moved into a
+  small `cnb-cli::http` module that rides on top of the SDK's
+  `reqwest::Client` (so they reuse its connection pool, default
+  `Authorization` / `User-Agent` headers, base URL precedence, and
+  tracing). Net effect:
+  - workspace member count: **7 → 6** (cnb-api removed)
+  - `Context::api()` + the `Client` field gone (sole HTTP client is
+    now the typed SDK)
+  - `CliError::Api(cnb_api::ApiError)` variant gone; replaced by
+    explicit `Unauthorized` / `NotFound` / `RateLimited` /
+    `ServerError` variants used by the new `http::passthrough` path,
+    so exit-code mapping is preserved (DESIGN §12).
+- **Migrated, not lost**:
+  - `cnb-api::tracing_layer::is_sensitive` → `cnb-cli::http::sensitive`
+    (only consumer was `cnb api -i`'s response-header redaction).
+  - `cnb-api::services::uploads::{Scope, Kind, Uploaded, upload_one,
+    detect_kind}` → `cnb-cli::http::uploads` (sole consumer is
+    `cnb issue create/comment --attach`). The new helper takes
+    `&mut Context` instead of `&cnb_api::Client`, and routes the
+    multipart POST through `client.http().reqwest_client()`.
+  - `cnb-api::Client::request_passthrough` → `cnb-cli::http::passthrough::{request, into_error, PassthroughResponse}`.
+    The new path **drops the cnb-api retry loop**: retries now only
+    happen for typed SDK calls (which carry their own retry
+    machinery in `HttpInner::execute`). `cnb api` is intended as a
+    debugging escape hatch where a failed call surfaces the error
+    immediately rather than silently retrying with a backoff —
+    behaviour aligns with `gh api`.
+- **Deleted source files**: `crates/cnb-api/src/{lib,client,error,retry,tracing_layer,url_safe,services/mod,services/uploads}.rs`
+  and `crates/cnb-api/Cargo.toml` (~700 + ~3700 + ~1100 + ~2300 +
+  ~1300 + ~2900 + ~830 + ~7400 bytes ≈ 20 KB of code, including
+  ~10 unit tests now superseded by their `cnb-cli::http::*`
+  equivalents).
+- **`cnb api` retry note**: if a future user reports they relied on
+  the old auto-retry, the cleanest fix is to expose a
+  `HttpInner::execute_raw` style entry point upstream and route
+  `passthrough::request` through it — tracked as a future SDK
+  enhancement rather than a local re-implementation.
+
 ### Changed (post-Phase-2 · `users::get_self` ported to the typed SDK)
 
 - **`cnb auth login` + `cnb auth status` token validation now flows

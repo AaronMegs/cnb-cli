@@ -7,6 +7,7 @@ pub mod cli;
 pub mod commands;
 pub mod context;
 pub mod error;
+pub mod http;
 
 pub use cli::{Cli, Commands};
 pub use context::Context;

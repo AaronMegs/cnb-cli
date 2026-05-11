@@ -7,18 +7,18 @@ license.workspace = true
 description = "Command implementations for cnb CLI"
 
 [dependencies]
-cnb-api.workspace = true
 cnb-auth.workspace = true
 cnb-config.workspace = true
 cnb-git.workspace = true
 cnb-tty.workspace = true
-# External typed SDK — used progressively, starting with `cnb search`.
+# External typed SDK — sole HTTP entry point after the cnb-api retirement.
 # Aliased to `cnb-sdk` to avoid collision with the workspace binary name.
 cnb-sdk.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 dialoguer.workspace = true
 indicatif.workspace = true
+mime_guess.workspace = true
 open.workspace = true
 serde.workspace = true
 serde_json.workspace = true

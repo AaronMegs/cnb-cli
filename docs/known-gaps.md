@@ -22,7 +22,7 @@
 | 5 | SDK-I14 · 非 JSON transport 修复           | 上游开发     | 等上游 SDK 发版                       | `release upload/download`、`build logs`、`cnb issue --attach` 四处 side-car reqwest | 上游暴露 `reqwest::Client` 或 bytes 方法 |
 | 6 | SDK-I12 · `set_repo_visibility` wire 形态  | 服务端澄清   | 等 cnb 服务端团队确认 canonical shape | `cnb repo set-visibility` 集成测试按 SDK 形态 ship | 服务端团队回复；SDK 文档化           |
 | 7 | SDK-I16 · `UpdateMembersRequest` wire 形态 | 服务端澄清   | 同 #6                                 | `cnb org member add/edit` 的 `--role` 字段语义     | 服务端团队回复                       |
-| 8 | `cnb-api::services::uploads` 彻底退休       | 依赖 #5       | 依赖 SDK-I14 上游修复                | 一个 facade 模块 + `reqwest` 依赖无法清零         | #5 完成后做一次 port                 |
+| 8 | ~~`cnb-api::services::uploads` 彻底退休~~ ✅ | 已解决       | cnb 0.2.2 + 后续清理已完成           | —                                                  | —                                    |
 | 9 | M5.2 · apt / yum / Docker image 分发       | 基础设施     | 需外部 apt repo / yum repo / registry | 对 Linux 发行版用户的安装路径覆盖不全             | 业主方 / ops 团队搭建 + 流水线对接   |
 | 10| M6 · mdbook 文档站部署                     | 基础设施     | 需选定部署目标（cnb pages 等）       | 文档站只在本地构建，未上线                         | 选定托管并接入 release.yml           |
 | 11| M6 · 外部 case study                       | 运营         | 需要至少 1 个外部用户案例            | v1.0 验收标准的最后一项                            | 找一个外部用户并收集反馈             |
@@ -113,12 +113,20 @@ Phase 2 步骤 2.11 完成时累计出 19 个 SDK 痛点，已按 A/B/C 分级�
 - **解除条件**：服务端回复 canonical 形态；SDK 要么文档化，要么加 `#[serde(alias = "role")]` 双向容忍。
 - **建议负责人**：与 cnb 服务端团队对接。
 
-### #8 `cnb-api::services::uploads` 彻底退休
+### #8 ~~`cnb-api::services::uploads` 彻底退休~~ — ✅ Resolved
 
-- **现状**：这是 `cnb-api` 整个 crate 最后的业务模块（~150 行），只为 `cnb issue create --attach` / `cnb issue comment --attach` 存在。
-- **为什么阻塞**：两阶段上传需要 raw bytes transport —— **完全等价于 SDK-I14 对 `release upload` 的阻塞**。
-- **解除条件**：#5 完成 → 把 `uploads.rs` 的两阶段上传改写为 SDK typed 调用（或者用 SDK 暴露的 `reqwest::Client`）→ 整个 `cnb-api` crate 从 workspace 中移除。
-- **建议负责人**：#5 解除后的任何移植 committer。这是 Phase 2 真正意义上的"完全收尾"。
+- **如何解决**：cnb 0.2.2 把 `HttpInner::reqwest_client()` 公开
+  （SDK-I14 落地）+ 后续清理把 `uploads.rs` 移植成
+  `cnb-cli::http::uploads`，直接用 SDK 共享 reqwest client 发送
+  multipart POST。整个 `crates/cnb-api/` 目录已从 workspace 删除，
+  `cnb-cli` 现在直接依赖 `cnb-sdk` 一个 HTTP 入口。
+- **同时收尾**：`cnb api` raw passthrough 也搬到了
+  `cnb-cli::http::passthrough`，`Context::api()` / `Client` 字段移除，
+  `CliError::Api(cnb_api::ApiError)` variant 移除（拆成 explicit
+  Unauthorized / NotFound / RateLimited / ServerError，DESIGN §12
+  退出码映射保留）。
+- **历史保留**：本条留作 audit trail；从下一次 known-gaps 维护开始
+  可以归档（移到一个"resolved-archive"段落或直接删）。
 
 ---
 

@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/cnb",
     "crates/cnb-cli",
-    "crates/cnb-api",
     "crates/cnb-config",
     "crates/cnb-auth",
     "crates/cnb-git",
@@ -24,7 +23,6 @@ description = "Official command-line tool for CNB (CloudNative Build, cnb.cool)"
 [workspace.dependencies]
 # --- internal crates ---
 cnb-cli = { path = "crates/cnb-cli", version = "0.4.0-alpha.1" }
-cnb-api = { path = "crates/cnb-api", version = "0.4.0-alpha.1" }
 cnb-config = { path = "crates/cnb-config", version = "0.4.0-alpha.1" }
 cnb-auth = { path = "crates/cnb-auth", version = "0.4.0-alpha.1" }
 cnb-git = { path = "crates/cnb-git", version = "0.4.0-alpha.1" }

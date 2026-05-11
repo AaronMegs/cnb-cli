@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-use cnb_api::Client;
 use cnb_auth::{resolve_token, AuthService, KeyringBackend, RealKeyring};
 use cnb_config::{hosts as hosts_mod, paths};
 use cnb_git::{parse_remote_url, RepoSlug};
@@ -21,12 +20,12 @@ pub struct Context {
     pub io: IoStreams,
     pub hosts_path: PathBuf,
     keyring: Box<dyn KeyringBackend>,
-    api: Option<Client>,
     /// Typed SDK client (external crate `cnb`, aliased as `cnb-sdk`).
-    /// Introduced in Phase 1 of the cnb-api → cnb SDK migration and shared
-    /// with new commands (starting with `cnb search`) while legacy facades
-    /// continue to use `api` above. Once every command has migrated,
-    /// `api` and the local `cnb-api` crate can be removed.
+    /// After the cnb-api → cnb-sdk migration completed, this is the
+    /// **only** HTTP entry point in the runtime — `cnb api` raw
+    /// passthrough and `cnb issue --attach` multipart uploads both
+    /// borrow this client's underlying `reqwest::Client` for shapes
+    /// the typed surface does not model.
     sdk: Option<cnb_sdk::ApiClient>,
     /// Base URL override for the SDK client — set by tests (wiremock) via
     /// [`Context::set_sdk_base_url`]. Production code leaves this `None` and
@@ -39,7 +38,7 @@ impl std::fmt::Debug for Context {
         f.debug_struct("Context")
             .field("host", &self.host)
             .field("hosts_path", &self.hosts_path)
-            .field("api", &self.api.is_some())
+            .field("sdk", &self.sdk.is_some())
             .finish()
     }
 }
@@ -58,7 +57,6 @@ impl Context {
             io,
             hosts_path,
             keyring,
-            api: None,
             sdk: None,
             sdk_base_url: None,
         })
@@ -72,35 +70,20 @@ impl Context {
         AuthService::new(self.keyring.as_ref(), self.hosts_path.clone())
     }
 
-    /// Build (or reuse) the API client for the active host.
-    /// Resolves the token via env > keyring > file.
-    pub fn api(&mut self) -> Result<&Client, CliError> {
-        if self.api.is_none() {
-            let (token, _src) = resolve_token(&self.host, None, self.keyring.as_ref(), Some(&self.hosts_path))?;
-            let client = Client::builder().token(token).build()?;
-            self.api = Some(client);
-        }
-        Ok(self.api.as_ref().expect("just inserted"))
-    }
-
     /// Build (or reuse) the typed SDK client (`cnb` crate / `cnb-sdk`).
     ///
-    /// The previous `api_with_token(token)` helper (last caller: `auth
-    /// login/status`) has been removed together with its callers — see
-    /// [`Context::sdk_with_token`] for the typed-SDK replacement. `api()`
-    /// (no suffix) stays because `cnb api` raw passthrough still depends
-    /// on `cnb_api::Client` (SDK-I14 JSON-only transport gap).
-    ///
-    /// Phase 1 of the cnb-api → SDK migration. Token resolution keeps the
-    /// project's three-tier contract (env > keyring > file) by running
-    /// `cnb_auth::resolve_token` here and **only** feeding the resolved
-    /// string into `ClientBuilder::token()` — we never rely on the SDK's own
+    /// Sole HTTP entry point in the runtime after the cnb-api retirement.
+    /// Token resolution keeps the project's three-tier contract
+    /// (env > keyring > file) by running `cnb_auth::resolve_token` here
+    /// and **only** feeding the resolved string into
+    /// `ClientBuilder::token()` — we never rely on the SDK's own
     /// `CNB_TOKEN` env-var fallback so behaviour stays identical on
     /// CI / remote-container machines where the env var is unset.
     ///
-    /// The base URL honours the same `CNB_API_BASE` test override that
-    /// `cnb-api::Client` already supports, keeping all existing wiremock
-    /// fixtures usable for SDK-backed commands too.
+    /// The base URL honours an effective precedence: explicit override
+    /// (set via `set_sdk_base_url`, used by unit tests) > `CNB_API_BASE`
+    /// env (used by integration tests / wiremock) > SDK default
+    /// (`https://api.cnb.cool`).
     pub fn sdk(&mut self) -> Result<&cnb_sdk::ApiClient, CliError> {
         if self.sdk.is_none() {
             let (token, _src) = resolve_token(&self.host, None, self.keyring.as_ref(), Some(&self.hosts_path))?;

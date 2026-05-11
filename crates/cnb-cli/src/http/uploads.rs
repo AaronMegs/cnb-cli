@@ -1,30 +1,41 @@
-//! `Uploads` service for `cnb issue create --attach` / `cnb issue comment --attach`
-//! (M2 §8.3 attachment chain).
+//! Two-phase asset upload for `cnb issue create --attach` /
+//! `cnb issue comment --attach` (DESIGN §8.3).
 //!
-//! CNB exposes four attachment endpoints; we route per (kind, scope):
+//! Migrated from the retired `cnb-api::services::uploads` module.
+//! Differences:
 //!
-//! | scope        | files                                                         | images                                                         |
-//! |--------------|---------------------------------------------------------------|----------------------------------------------------------------|
-//! | repository   | `POST /{repo}/-/upload/files`                                 | `POST /{repo}/-/upload/imgs`                                   |
-//! | issue comment| `POST /{repo}/-/issues/{n}/comment-file-asset-upload-url`     | `POST /{repo}/-/issues/{n}/comment-image-asset-upload-url`     |
+//! - Uses the SDK's shared `reqwest::Client` for the multipart POST,
+//!   which already carries the `Authorization` and `User-Agent`
+//!   default headers — so the call site never sees the bearer token.
+//! - Uses `client.http().url(path)` for URL construction, getting the
+//!   same `CNB_API_BASE` env precedence and percent-encoding as every
+//!   other SDK call.
+//! - Errors flow back through [`CliError`] directly (the previous
+//!   wrapper bounced through `cnb-api::ApiError`, which has now been
+//!   removed).
 //!
-//! Image kind is auto-detected from `Content-Type` (`image/*`); callers can
-//! force a kind via [`Kind::File`].
+//! CNB exposes four attachment endpoints; the `Scope`/`Kind` matrix
+//! routes per `(scope, kind)`:
 //!
-//! Both endpoint families accept `multipart/form-data` with one or more
-//! `file` parts. We stream from disk to avoid buffering large attachments.
+//! | scope         | files                                                     | images                                                     |
+//! |---------------|-----------------------------------------------------------|------------------------------------------------------------|
+//! | repository    | `POST /{repo}/-/upload/files`                             | `POST /{repo}/-/upload/imgs`                               |
+//! | issue comment | `POST /{repo}/-/issues/{n}/comment-file-asset-upload-url` | `POST /{repo}/-/issues/{n}/comment-image-asset-upload-url` |
+//!
+//! Both endpoint families accept `multipart/form-data` with one or
+//! more `file` parts. We stream from disk to avoid buffering large
+//! attachments.
 
 use std::path::Path;
 
 use reqwest::multipart::{Form, Part};
-use reqwest::Method;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
-use crate::client::Client;
-use crate::error::ApiError;
+use crate::context::Context;
+use crate::error::CliError;
 
 /// What kind of asset is being uploaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +70,10 @@ impl Scope<'_> {
 
 /// Result of one upload — the URL or markdown reference returned by CNB.
 ///
-/// CNB is inconsistent across endpoints: some return `{"url": "..."}`, others
-/// `{"data": {"url": "..."}}`, others a plain string. We normalize to the
-/// first non-empty string we can find under the common keys.
+/// CNB is inconsistent across endpoints: some return `{"url": "..."}`,
+/// others `{"data": {"url": "..."}}`, others a plain string. We
+/// normalise to the first non-empty string we can find under the
+/// common keys.
 #[derive(Debug, Clone)]
 pub struct Uploaded {
     pub kind: Kind,
@@ -81,7 +93,6 @@ struct UrlEnvelope {
 }
 
 fn extract_url(v: &Value) -> Option<String> {
-    // Try direct envelope first.
     if let Ok(env) = serde_json::from_value::<UrlEnvelope>(v.clone()) {
         if let Some(u) = env.url.or(env.download_url) {
             if !u.is_empty() {
@@ -101,7 +112,6 @@ fn extract_url(v: &Value) -> Option<String> {
             }
         }
     }
-    // Fallback: top-level scalar.
     if let Some(s) = v.as_str() {
         return Some(s.to_owned());
     }
@@ -120,20 +130,20 @@ pub fn detect_kind(path: &Path) -> Kind {
 
 /// Stream-upload one local file. The kind is auto-detected unless overridden.
 ///
-/// Errors: file IO, network, or non-2xx responses surface as [`ApiError`].
+/// Errors: file IO, network, or non-2xx responses surface as [`CliError`].
 pub async fn upload_one(
-    client: &Client,
+    ctx: &mut Context,
     scope: Scope<'_>,
     path: &Path,
     forced_kind: Option<Kind>,
-) -> Result<Uploaded, ApiError> {
+) -> Result<Uploaded, CliError> {
     let kind = forced_kind.unwrap_or_else(|| detect_kind(path));
     let endpoint = scope.endpoint(kind);
 
     let original_name = path
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| ApiError::InvalidUrl(format!("invalid file path: {path:?}")))?
+        .ok_or_else(|| CliError::Generic(format!("invalid file path: {path:?}")))?
         .to_owned();
     let mime_type = mime_guess::from_path(path)
         .first_or_octet_stream()
@@ -147,23 +157,41 @@ pub async fn upload_one(
     let part = Part::stream(body)
         .file_name(original_name.clone())
         .mime_str(&mime_type)
-        .map_err(|e| ApiError::InvalidUrl(format!("invalid mime `{mime_type}`: {e}")))?;
+        .map_err(|e| CliError::Generic(format!("invalid mime `{mime_type}`: {e}")))?;
     let form = Form::new().part("file", part);
 
-    // We need the underlying RequestBuilder to attach multipart; use the
-    // public helper that returns the builder pre-configured (token + UA).
-    let req = client.multipart_request(Method::POST, &endpoint, form)?;
-    let resp = req.send().await?;
+    let client = ctx.sdk()?;
+    // Same base-URL precedence as every other SDK call thanks to the
+    // SDK-owned URL builder (cnb 0.2.2 made `HttpInner::url` public).
+    let url = client
+        .http()
+        .url(&endpoint)
+        .map_err(|e| CliError::Generic(format!("invalid upload endpoint `{endpoint}`: {e}")))?;
+    let resp = client
+        .http()
+        .reqwest_client()
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| CliError::Generic(format!("upload POST failed: {e}")))?;
+
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| CliError::Generic(format!("upload body read failed: {e}")))?;
 
     if !status.is_success() {
-        return Err(ApiError::from_http(status.as_u16(), &text, None));
+        return Err(CliError::Generic(format!(
+            "upload {} {endpoint}: {text}",
+            status.as_u16()
+        )));
     }
 
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
     let url = extract_url(&v)
-        .ok_or_else(|| ApiError::Auth(format!("upload succeeded but response missing url field: {text}")))?;
+        .ok_or_else(|| CliError::Generic(format!("upload succeeded but response missing url field: {text}")))?;
 
     Ok(Uploaded {
         kind,

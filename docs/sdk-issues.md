@@ -86,24 +86,34 @@ group.
 > minimal-repro files in the same directory remain as attachments
 > with copy-pasteable code snippets.
 
-1. **Phase 2 is now functionally complete.** As of step 2.11 the
-   only cnb-api residue in `cnb-cli` is:
+1. **Phase 2 is now fully complete; the local `cnb-api` crate has
+   been retired.** All three flows that used to hold the crate alive
+   are resolved:
    - ~~`cnb auth login/status` token validation (`users::get_self`)~~
      **Resolved in the post-Phase-2 `users::get_self` follow-up**
-     — `cnb auth login` and `cnb auth status` now call the typed
+     — both verbs call the typed
      `cnb_sdk::users::UsersClient::get_user_info()` via a new
-     `Context::sdk_with_token(token)` one-shot builder. The
-     `cnb-api::services::users` module was deleted.
-   - `cnb issue create --attach` and `cnb issue comment --attach`
-     attachment uploads (`services::uploads`) — same JSON-only
-     transport blocker as SDK-I14, scoped out of step 2.11.
-   - `cnb api` raw passthrough — structurally cannot use the
-     SDK's JSON-only transport (see SDK-I14).
+     `Context::sdk_with_token(token)` one-shot builder.
+   - ~~`cnb issue create --attach` and `cnb issue comment --attach`
+     attachment uploads (`services::uploads`)~~
+     **Resolved in the cnb 0.2.2 follow-up cleanup** — the multipart
+     POST is now driven via `client.http().reqwest_client()` in the
+     local `cnb-cli::http::uploads` module, sharing the SDK's
+     bearer auth, base URL, and connection pool.
+   - ~~`cnb api` raw passthrough~~
+     **Resolved alongside it** — `cnb-cli::http::passthrough` runs on
+     top of the same SDK reqwest client (with `HttpInner::url(path)`
+     handling URL construction). The retry loop the cnb-api crate
+     used to provide for `cnb api` is intentionally not reimplemented:
+     `cnb api` is a debugging escape hatch and `gh api`-shaped UX
+     wants failures to surface immediately.
 
-   The `cnb-api::services::{builds,issues,labels,missions,orgs,pulls,
-   registries,releases,repo_extras,repos,users,workspaces}` modules
-   have all been deleted. The crate is now ~92% smaller and only
-   carries `Client` + `tracing_layer` + `uploads`.
+   The entire `crates/cnb-api/` tree has been deleted (workspace
+   member count: 7 → 6). `Context::api()` and the `Client` field are
+   gone; `CliError::Api(cnb_api::ApiError)` has been replaced with
+   explicit `Unauthorized` / `NotFound` / `RateLimited` /
+   `ServerError` variants used by the new passthrough error mapper,
+   so every exit-code mapping in DESIGN §12 is preserved.
 2. File the **five Tier A issues** first — one each, with a minimal
    reproducible code sample pulled straight from `cnb-cli` git
    history. They stand on their own and have the clearest upstream ask.

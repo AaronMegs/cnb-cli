@@ -1,19 +1,18 @@
 //! `cnb issue` — issues, comments, assignees, labels (M2 §8.3, 11 subcommands).
 //!
-//! Fully SDK-backed as of Phase 2 step 2.11, with one carve-out: the
-//! `--attach` flow on `create` / `comment` still routes through
-//! `cnb_api::services::uploads` because the two-phase asset upload
-//! flow there falls under SDK-I14 (non-JSON transport). All other
-//! verbs — `list`, `view`, `create` (no attachments), `edit`,
-//! `close`, `reopen`, `comment` (no attachments), `comment-edit`,
-//! `assign`, `label`, `comments` (list), `activity`, `properties`
-//! (read and write) — run through `cnb_sdk::issues::IssuesClient`.
+//! Fully SDK-backed as of Phase 2 step 2.11; the `--attach` flow on
+//! `create` / `comment` (multipart upload) is handled by the local
+//! [`crate::http::uploads`] module, which itself rides on top of the
+//! SDK's shared `reqwest::Client` (so attachment requests carry the
+//! same `Authorization`, `User-Agent`, base URL, and connection pool
+//! as every typed call). Every other verb — `list`, `view`, `create`,
+//! `edit`, `close`, `reopen`, `comment`, `comment-edit`, `assign`,
+//! `label`, `comments` (list), `activity`, `properties` (read and
+//! write) — runs through `cnb_sdk::issues::IssuesClient`.
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use cnb_api::services::uploads;
-use cnb_api::Client;
 use cnb_sdk::issues::{ListIssueActivitiesQuery, ListIssuesQuery, ListUserIssuesQuery};
 use cnb_sdk::models::{
     DeleteIssueAssigneesForm, IssuePropertiesForm, PatchIssueCommentForm, PatchIssueForm, PostIssueAssigneesForm,
@@ -24,6 +23,7 @@ use serde_json::Value;
 
 use crate::context::Context;
 use crate::error::CliError;
+use crate::http::uploads;
 
 #[derive(Debug, Args)]
 pub struct IssueArgs {
@@ -376,12 +376,13 @@ async fn create(ctx: &mut Context, args: CreateArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     let mut body = args.body.unwrap_or_default();
     if !args.attach.is_empty() {
-        // Attachment flow still rides on the cnb-api uploads facade —
-        // this is SDK-I14 (non-JSON transport) territory and is scoped
-        // out of step 2.11. The write of the issue itself is on the
-        // SDK though.
-        let client = ctx.api()?;
-        body = append_attachments(client, &repo, None, body, &args.attach).await?;
+        // The attachment endpoints are multipart/form-data, which the
+        // typed SDK does not model directly — but `crate::http::uploads`
+        // rides on top of `client.http().reqwest_client()`, so the same
+        // bearer auth + base URL + connection pool the typed calls use
+        // are reused for the attachment POSTs. The write of the issue
+        // itself stays on the typed SDK.
+        body = append_attachments(ctx, &repo, None, body, &args.attach).await?;
     }
     let payload = PostIssueForm {
         title: Some(args.title),
@@ -472,8 +473,7 @@ async fn comment(ctx: &mut Context, args: CommentArgs) -> Result<(), CliError> {
         (None, None) => String::new(),
     };
     if !args.attach.is_empty() {
-        let client = ctx.api()?;
-        body = append_attachments(client, &repo, Some(args.number), body, &args.attach).await?;
+        body = append_attachments(ctx, &repo, Some(args.number), body, &args.attach).await?;
     }
     if body.trim().is_empty() {
         return Err(CliError::BadArgs(
@@ -687,7 +687,7 @@ fn issue_number_i64(n: u64) -> Result<i64, CliError> {
 /// - `None` → repo-scoped (`/{repo}/-/upload/{files,imgs}`)
 /// - `Some(n)` → comment-scoped (`/{repo}/-/issues/{n}/comment-*-asset-upload-url`)
 async fn append_attachments(
-    client: &Client,
+    ctx: &mut Context,
     repo: &str,
     comment_number: Option<u64>,
     mut body: String,
@@ -698,7 +698,7 @@ async fn append_attachments(
         None => uploads::Scope::Repo(repo),
     };
     for p in paths {
-        let up = uploads::upload_one(client, scope.clone(), p, None).await?;
+        let up = uploads::upload_one(ctx, scope.clone(), p, None).await?;
         // Append a blank line + link.
         if !body.is_empty() && !body.ends_with('\n') {
             body.push('\n');

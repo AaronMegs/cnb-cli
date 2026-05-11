@@ -551,24 +551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cnb-api"
-version = "0.4.0-alpha.1"
-dependencies = [
- "mime_guess",
- "once_cell",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "wiremock",
-]
-
-[[package]]
 name = "cnb-auth"
 version = "0.4.0-alpha.1"
 dependencies = [
@@ -587,13 +569,13 @@ dependencies = [
  "clap",
  "clap_complete",
  "cnb 0.2.2",
- "cnb-api",
  "cnb-auth",
  "cnb-config",
  "cnb-git",
  "cnb-tty",
  "dialoguer",
  "indicatif",
+ "mime_guess",
  "open",
  "reqwest",
  "serde",
