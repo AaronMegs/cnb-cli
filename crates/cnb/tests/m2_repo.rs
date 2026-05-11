@@ -381,9 +381,9 @@ async fn repo_list_pinned_renders_path_and_description() {
 #[tokio::test]
 async fn repo_pin_adds_to_existing_set_via_put() {
     // `pin` first does a GET of the current set, then PUTs the merged
-    // set back. Wiremock mounts both mocks; the CLI reads via SDK and
-    // writes via `Context::sdk_raw_json` because the SDK does not model
-    // the PUT endpoint (SDK-I18).
+    // set back. cnb 0.2.2 modelled the PUT (SDK-I18 resolved), so the
+    // body is now a bare JSON array instead of the legacy `{"repos":[…]}`
+    // envelope.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/cnb/-/pinned-repos"))
@@ -395,9 +395,10 @@ async fn repo_pin_adds_to_existing_set_via_put() {
     Mock::given(method("PUT"))
         .and(path("/cnb/-/pinned-repos"))
         // Keys BTreeSet-sorted, so the expected order is stable:
-        // cnb/docs < cnb/feedback lexicographically.
-        .and(body_partial_json(json!({"repos": ["cnb/docs", "cnb/feedback"]})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        // cnb/docs < cnb/feedback lexicographically. SDK 0.2.2 sends a
+        // bare array — matched as a literal JSON value, no wrapper.
+        .and(wiremock::matchers::body_json(json!(["cnb/docs", "cnb/feedback"])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;
 
@@ -424,8 +425,8 @@ async fn repo_unpin_removes_from_existing_set() {
         .await;
     Mock::given(method("PUT"))
         .and(path("/cnb/-/pinned-repos"))
-        .and(body_partial_json(json!({"repos": ["cnb/feedback"]})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .and(wiremock::matchers::body_json(json!(["cnb/feedback"])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;
 

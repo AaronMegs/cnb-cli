@@ -386,8 +386,10 @@ async fn view_stage(ctx: &mut Context, args: ViewStageArgs) -> Result<(), CliErr
 
 /// Download the runner log. The SDK's typed `build_runner_download_log`
 /// returns `serde_json::Value`, but the real endpoint replies with plain
-/// text, so we use a side-car `reqwest::Client` (same pattern as
-/// `cnb release download`). See SDK-I14.
+/// text. cnb 0.2.2 made `HttpInner::reqwest_client()` public (SDK-I14
+/// resolved), so we now drive the GET through the SDK's shared reqwest
+/// client via `Context::sdk_raw_get_bytes` — same connection pool, same
+/// auth header, same base-URL precedence.
 async fn logs(ctx: &mut Context, args: LogsArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     if args.pipeline_id.contains('/') {
@@ -396,7 +398,7 @@ async fn logs(ctx: &mut Context, args: LogsArgs) -> Result<(), CliError> {
             args.pipeline_id
         )));
     }
-    let body = download_log_bytes(&repo, &args.pipeline_id).await?;
+    let body = download_log_bytes(ctx, &repo, &args.pipeline_id).await?;
     if let Some(out) = args.output {
         std::fs::write(&out, body.as_bytes())?;
         eprintln!("✓ Wrote {} bytes to {}", body.len(), out.display());
@@ -406,39 +408,10 @@ async fn logs(ctx: &mut Context, args: LogsArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn download_log_bytes(repo: &str, pipeline_id: &str) -> Result<String, CliError> {
-    let mut base = std::env::var("CNB_API_BASE")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned());
-    if !base.ends_with('/') {
-        base.push('/');
-    }
-    let base_url =
-        url::Url::parse(&base).map_err(|e| CliError::Generic(format!("invalid SDK base url `{base}`: {e}")))?;
-    let full = base_url
-        .join(&format!("{repo}/-/build/runner/download/log/{pipeline_id}"))
-        .map_err(|e| CliError::Generic(format!("could not build log URL: {e}")))?;
-    let token = std::env::var("CNB_TOKEN").unwrap_or_default();
-    let mut req = reqwest::Client::new().get(full);
-    if !token.is_empty() {
-        req = req.bearer_auth(token);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| CliError::Generic(format!("log download GET failed: {e}")))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(CliError::Generic(format!(
-            "log download GET {}: {text}",
-            status.as_u16()
-        )));
-    }
-    resp.text()
-        .await
-        .map_err(|e| CliError::Generic(format!("log body: {e}")))
+async fn download_log_bytes(ctx: &mut Context, repo: &str, pipeline_id: &str) -> Result<String, CliError> {
+    let path = format!("/{repo}/-/build/runner/download/log/{pipeline_id}");
+    let bytes = ctx.sdk_raw_get_bytes(&path).await?;
+    String::from_utf8(bytes).map_err(|e| CliError::Generic(format!("log body not valid UTF-8: {e}")))
 }
 
 async fn cancel(ctx: &mut Context, args: SnArgs) -> Result<(), CliError> {

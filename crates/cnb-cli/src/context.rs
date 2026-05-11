@@ -162,16 +162,6 @@ impl Context {
         builder.build().map_err(CliError::from)
     }
 
-    /// Resolve the base URL that the SDK client will actually use. Mirrors
-    /// the precedence used inside [`Context::sdk`]: explicit override
-    /// (tests) > `CNB_API_BASE` env (wiremock fixtures) > SDK default.
-    fn effective_sdk_base_url(&self) -> String {
-        self.sdk_base_url
-            .clone()
-            .or_else(|| std::env::var("CNB_API_BASE").ok().filter(|v| !v.is_empty()))
-            .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned())
-    }
-
     /// Low-level GET returning `serde_json::Value`, routed through the SDK's
     /// HTTP layer (shares its reqwest pool, retry config, auth header, and
     /// tracing instrumentation).
@@ -182,19 +172,15 @@ impl Context {
     /// typed `client.<resource>().<op>()` call wherever the DTO is
     /// sufficient.
     pub async fn sdk_raw_get(&mut self, path: &str) -> Result<serde_json::Value, CliError> {
-        let base = self.effective_sdk_base_url();
-        // `url::Url::join` treats an absolute path correctly but requires
-        // the base to end with `/`. We normalise defensively.
-        let mut base_with_slash = base;
-        if !base_with_slash.ends_with('/') {
-            base_with_slash.push('/');
-        }
-        let base_url = url::Url::parse(&base_with_slash)
-            .map_err(|e| CliError::Generic(format!("invalid SDK base url `{base_with_slash}`: {e}")))?;
-        let full = base_url
-            .join(path.trim_start_matches('/'))
-            .map_err(|e| CliError::Generic(format!("could not join path `{path}` onto base: {e}")))?;
         let client = self.sdk()?;
+        // cnb 0.2.2 (SDK-I01 resolved) made `HttpInner::url()` public, so
+        // we can let the SDK own URL construction (base URL precedence,
+        // trailing-slash normalisation, percent-encoding) instead of
+        // reimplementing it here.
+        let full = client
+            .http()
+            .url(path)
+            .map_err(|e| CliError::Generic(format!("invalid SDK path `{path}`: {e}")))?;
         let v: serde_json::Value = client.http().execute(reqwest::Method::GET, full).await?;
         Ok(v)
     }
@@ -214,19 +200,55 @@ impl Context {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, CliError> {
-        let base = self.effective_sdk_base_url();
-        let mut base_with_slash = base;
-        if !base_with_slash.ends_with('/') {
-            base_with_slash.push('/');
-        }
-        let base_url = url::Url::parse(&base_with_slash)
-            .map_err(|e| CliError::Generic(format!("invalid SDK base url `{base_with_slash}`: {e}")))?;
-        let full = base_url
-            .join(path.trim_start_matches('/'))
-            .map_err(|e| CliError::Generic(format!("could not join path `{path}` onto base: {e}")))?;
         let client = self.sdk()?;
+        let full = client
+            .http()
+            .url(path)
+            .map_err(|e| CliError::Generic(format!("invalid SDK path `{path}`: {e}")))?;
         let v: serde_json::Value = client.http().execute_with_body(method, full, body).await?;
         Ok(v)
+    }
+
+    /// Low-level GET returning raw response bytes, routed through the SDK's
+    /// reqwest client (shares its connection pool, default headers, and
+    /// resolved auth token).
+    ///
+    /// Resolves the same friction SDK-I14 used to need a side-car
+    /// `reqwest::Client::new()` for: endpoints whose body is **not** JSON
+    /// (binary file downloads, plain-text runner logs). Now that
+    /// `HttpInner::reqwest_client()` is `pub` (cnb 0.2.2), consumers can
+    /// drive arbitrary GETs while still getting the SDK's
+    /// `Authorization: Bearer …` header for free.
+    ///
+    /// **Note**: the SDK's reqwest client always attaches the
+    /// `Accept: application/vnd.cnb.api+json` header. This is harmless on
+    /// the bytes endpoints we use it for (the server ignores `Accept` for
+    /// binary downloads), but callers wanting a strict `Accept: */*` should
+    /// build a bespoke request via `client.http().reqwest_client()` and
+    /// override the header explicitly.
+    pub async fn sdk_raw_get_bytes(&mut self, path: &str) -> Result<Vec<u8>, CliError> {
+        let client = self.sdk()?;
+        let full = client
+            .http()
+            .url(path)
+            .map_err(|e| CliError::Generic(format!("invalid SDK path `{path}`: {e}")))?;
+        let resp = client
+            .http()
+            .reqwest_client()
+            .get(full)
+            .send()
+            .await
+            .map_err(|e| CliError::Generic(format!("download GET failed: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(CliError::Generic(format!("download GET {}: {text}", status.as_u16())));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| CliError::Generic(format!("download body: {e}")))?;
+        Ok(bytes.to_vec())
     }
 
     /// Resolve the repository slug to operate on (M2 §8.2 contract).

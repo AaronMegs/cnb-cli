@@ -617,9 +617,16 @@ async fn set_visibility(ctx: &mut Context, args: SetVisibilityArgs) -> Result<()
 }
 
 async fn pin(ctx: &mut Context, args: PinArgs, add: bool) -> Result<(), CliError> {
-    // Read current pinned set (typed via SDK), mutate, then write back
-    // with a raw PUT — the SDK only models `GET /{slug}/-/pinned-repos`,
-    // not the `PUT` counterpart that this op needs.
+    // Resolved upstream in cnb 0.2.2 (SDK-I18): `set_pinned_repo_by_group`
+    // is now a first-class typed method, so the read-modify-write cycle
+    // can stay entirely on the SDK's typed surface — no more
+    // `Context::sdk_raw_json` round-trip.
+    //
+    // **Wire-shape note**: the SDK serialises `body: &Vec<String>` as a
+    // bare JSON array (`["cnb/docs","cnb/feedback"]`) rather than the
+    // `{"repos":[…]}` envelope our previous raw-PUT used. We follow the
+    // SDK on the assumption it tracks the OpenAPI spec; the wiremock
+    // tests below were updated alongside this method to match.
     let current = {
         let client = ctx.sdk()?;
         client
@@ -641,10 +648,13 @@ async fn pin(ctx: &mut Context, args: PinArgs, add: bool) -> Result<(), CliError
         }
     }
     let final_list: Vec<String> = set.into_iter().collect();
-    let body = serde_json::json!({ "repos": final_list });
-    let _ = ctx
-        .sdk_raw_json(reqwest::Method::PUT, &format!("/{}/-/pinned-repos", args.slug), &body)
-        .await?;
+    {
+        let client = ctx.sdk()?;
+        let _ = client
+            .repositories()
+            .set_pinned_repo_by_group(args.slug.clone(), &final_list)
+            .await?;
+    }
     eprintln!("✓ {} pinned set updated ({} entries)", args.slug, final_list.len());
     Ok(())
 }

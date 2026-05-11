@@ -502,59 +502,28 @@ async fn upload_one(
     Ok(())
 }
 
-/// Download a release asset. The SDK exposes `get_releases_asset` but
-/// decodes the body as JSON, which is wrong for this endpoint (it returns
-/// raw bytes after a 302 to a presigned URL). We therefore use a raw
-/// `reqwest::Client` that follows redirects by default. Base URL
-/// precedence matches the SDK client (env > default). See SDK-I14.
+/// Download a release asset. The SDK's typed `get_releases_asset` decodes
+/// the body as JSON, which is wrong for this endpoint (raw bytes after a
+/// 302 to a presigned URL). cnb 0.2.2 made `HttpInner::reqwest_client()`
+/// public (SDK-I14 resolved), so we now drive the GET through the SDK's
+/// shared reqwest client via `Context::sdk_raw_get_bytes` — same
+/// connection pool, same auth header, same base-URL precedence.
 async fn download(ctx: &mut Context, args: DownloadArgs) -> Result<(), CliError> {
     let repo = ctx.resolve_repo(args.repo.repo.as_deref())?;
-    let dest = download_bytes(&repo, &args.tag, &args.filename, &args.output).await?;
+    let dest = download_bytes(ctx, &repo, &args.tag, &args.filename, &args.output).await?;
     eprintln!("✓ Downloaded {} → {}", args.filename, dest.display());
     Ok(())
 }
 
 async fn download_bytes(
+    ctx: &mut Context,
     repo: &str,
     tag: &str,
     filename: &str,
     dest_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, CliError> {
-    let mut base = std::env::var("CNB_API_BASE")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| cnb_sdk::DEFAULT_BASE_URL.to_owned());
-    if !base.ends_with('/') {
-        base.push('/');
-    }
-    let base_url =
-        url::Url::parse(&base).map_err(|e| CliError::Generic(format!("invalid SDK base url `{base}`: {e}")))?;
-    let full = base_url
-        .join(&format!("{repo}/-/releases/download/{tag}/{filename}"))
-        .map_err(|e| CliError::Generic(format!("could not build download URL: {e}")))?;
-
-    // Token comes from the env (set by the wiremock harness and by
-    // `cnb auth login` for real runs). A proper fix would reuse the SDK
-    // resolver via `Context::sdk()` + its reqwest pool, but the SDK does
-    // not yet expose the underlying client — see SDK-I14.
-    let token = std::env::var("CNB_TOKEN").unwrap_or_default();
-    let mut req = reqwest::Client::new().get(full);
-    if !token.is_empty() {
-        req = req.bearer_auth(token);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| CliError::Generic(format!("download GET failed: {e}")))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(CliError::Generic(format!("download GET {}: {text}", status.as_u16())));
-    }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| CliError::Generic(format!("download body: {e}")))?;
+    let path = format!("/{repo}/-/releases/download/{tag}/{filename}");
+    let bytes = ctx.sdk_raw_get_bytes(&path).await?;
     tokio::fs::create_dir_all(dest_dir).await?;
     let dest = dest_dir.join(filename);
     tokio::fs::write(&dest, &bytes).await?;
