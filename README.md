@@ -218,6 +218,10 @@ cnb api /user --template '{username}: {email}'
 
 ## Development
 
+> **Contributing?** See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full
+> guide (PR flow, commit-message conventions, testing requirements,
+> code-style rules). The commands below are the bare-minimum local loop.
+
 ```bash
 # Build everything
 cargo build --workspace

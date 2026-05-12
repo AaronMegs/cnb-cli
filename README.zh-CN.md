@@ -216,6 +216,9 @@ cnb api /user --template '{username}: {email}'
 
 ## 开发
 
+> **想贡献代码？** 完整指南见 [`CONTRIBUTING.md`](CONTRIBUTING.md)
+> （PR 流程、commit message 约定、测试要求、代码风格规则）。下面只是本地最小循环。
+
 ```bash
 # 构建全部
 cargo build --workspace
