@@ -73,11 +73,18 @@ pub struct OutputOpts {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Repo slug (`OWNER/REPO[/SUBPATH]`). Omit to use the current
+    /// directory's git remote, or pass `--mine` to list across **all**
+    /// repos accessible to the current token.
     pub repo: Option<String>,
     /// `open` (default) | `closed` | `all`.
     #[arg(long, default_value = "open")]
     pub state: String,
-    /// Restrict to issues authored by the current user.
+    /// List issues across **all repos** that the current token can see
+    /// (issues you authored, are assigned to, or are watching). When
+    /// set, `repo` is ignored. Calls `GET /user/issues` upstream.
+    /// The default table picks up an extra `REPO` column so you can
+    /// tell which project each row lives in.
     #[arg(long)]
     pub mine: bool,
     #[arg(long, default_value_t = 30u32)]
@@ -311,15 +318,69 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
             })
             .unwrap_or_default();
         let upd = it.get("updated_at").and_then(Value::as_str).unwrap_or("");
-        rows.push(vec![n_display, title.to_owned(), labels, upd.to_owned()]);
+        if args.mine {
+            // `--mine` returns `UserIssue` items, which carry a `repo`
+            // sub-object the repo-scoped `Issue` does not. Surface it as
+            // an extra column so you can tell which project each row
+            // belongs to — without this column the cross-repo view is
+            // basically unreadable.
+            let repo_path = it
+                .get("repo")
+                .and_then(|r| r.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            rows.push(vec![
+                repo_path.to_owned(),
+                n_display,
+                title.to_owned(),
+                labels,
+                upd.to_owned(),
+            ]);
+        } else {
+            rows.push(vec![n_display, title.to_owned(), labels, upd.to_owned()]);
+        }
     }
     let mut stdout = std::io::stdout().lock();
-    table::write_table(
-        &mut stdout,
-        &["#", "TITLE", "LABELS", "UPDATED"],
-        &rows,
-        ctx.io.stdout_is_tty,
-    )?;
+    if args.mine {
+        table::write_table(
+            &mut stdout,
+            &["REPO", "#", "TITLE", "LABELS", "UPDATED"],
+            &rows,
+            ctx.io.stdout_is_tty,
+        )?;
+    } else {
+        table::write_table(
+            &mut stdout,
+            &["#", "TITLE", "LABELS", "UPDATED"],
+            &rows,
+            ctx.io.stdout_is_tty,
+        )?;
+    }
+    // When the table is empty, drop a one-liner stderr hint so users can
+    // tell the difference between "no rows match the filter" and "the
+    // command silently broke". Only on TTY: pipes / scripts must keep
+    // seeing exactly the rendered table on stdout.
+    if rows.is_empty() && ctx.io.stderr_is_tty {
+        if args.mine {
+            eprintln!(
+                "(no issues match — `cnb issue list --mine --state {}` saw 0 rows across all repos accessible to the current token)",
+                args.state
+            );
+        } else {
+            // Show the slug we actually queried so users can confirm the
+            // repo resolution is what they expected.
+            let queried = args
+                .repo
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| ctx.resolve_repo(None).ok())
+                .unwrap_or_else(|| "<unresolved>".to_owned());
+            eprintln!(
+                "(no issues in `{queried}` with --state {}; try `--state all`, pass an explicit OWNER/REPO, or use `--mine` for a cross-repo view)",
+                args.state
+            );
+        }
+    }
     Ok(())
 }
 

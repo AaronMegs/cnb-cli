@@ -283,7 +283,7 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
     }
     let items = {
         let client = ctx.sdk()?;
-        client.pulls().list_pulls(repo, &q).await?
+        client.pulls().list_pulls(repo.clone(), &q).await?
     };
     let v = serde_json::to_value(&items).expect("PullRequest serialises infallibly");
     if render(ctx, &args.out, &v)? {
@@ -311,6 +311,17 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
         &rows,
         ctx.io.stdout_is_tty,
     )?;
+    // Empty-table hint on TTY (mirrors `cnb issue list`). Note: the
+    // cnb platform does NOT expose a `/user/pulls` cross-repo endpoint
+    // (verified 2026-05-12), so unlike `cnb issue list --mine`, there
+    // is no `--mine` equivalent for PRs — we point users at the issue
+    // command for the closest analogue.
+    if rows.is_empty() && ctx.io.stderr_is_tty {
+        eprintln!(
+            "(no PRs in `{repo}` with --state {}; try `--state all`, pass an explicit OWNER/REPO, or use `cnb issue list --mine` for a cross-repo view of issues — the cnb platform does not currently expose a cross-repo PR listing)",
+            args.state
+        );
+    }
     Ok(())
 }
 
