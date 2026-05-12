@@ -313,12 +313,14 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
     )?;
     // Empty-table hint on TTY (mirrors `cnb issue list`). Note: the
     // cnb platform does NOT expose a `/user/pulls` cross-repo endpoint
-    // (verified 2026-05-12), so unlike `cnb issue list --mine`, there
-    // is no `--mine` equivalent for PRs — we point users at the issue
-    // command for the closest analogue.
+    // (verified 2026-05-12), so unlike `cnb issue list` (whose default
+    // is now the cross-repo `/user/issues` view), `cnb pr list` is
+    // **always** repo-scoped — there is no global PR view to fall
+    // back to. We surface this asymmetry in the hint so users do not
+    // assume the feature is missing by oversight.
     if rows.is_empty() && ctx.io.stderr_is_tty {
         eprintln!(
-            "(no PRs in `{repo}` with --state {}; try `--state all`, pass an explicit OWNER/REPO, or use `cnb issue list --mine` for a cross-repo view of issues — the cnb platform does not currently expose a cross-repo PR listing)",
+            "(no PRs in `{repo}` with --state {}; try `--state all` or pass a different OWNER/REPO. The cnb platform does not currently expose a cross-repo PR listing; for a cross-repo *issue* view, run `cnb issue list` without a slug)",
             args.state
         );
     }

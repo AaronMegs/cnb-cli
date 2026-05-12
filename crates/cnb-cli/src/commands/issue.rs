@@ -73,20 +73,25 @@ pub struct OutputOpts {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Repo slug (`OWNER/REPO[/SUBPATH]`). Omit to use the current
-    /// directory's git remote, or pass `--mine` to list across **all**
-    /// repos accessible to the current token.
+    /// Optional repo slug (`OWNER/REPO[/SUBPATH]`).
+    ///
+    /// - **Omitted** (default) → list issues **across all repos**
+    ///   accessible to the current token (issues you authored, are
+    ///   assigned to, or are watching). Backed by
+    ///   `GET /user/issues` (`ListUserIssues`); the table picks up
+    ///   an extra leading `REPO` column.
+    /// - **Provided** → list issues **inside that one repo only**.
+    ///   Backed by `GET /{slug}/-/issues` (`ListIssues`).
+    ///
+    /// Tip: `cnb issue list .` is **not** auto-resolved from
+    /// `git remote`; pass the slug explicitly when you want
+    /// repo-scoped output (e.g. `cnb issue list aodoo/tools/cnb-cli`).
+    /// This avoids the surprising "I'm in a repo but I want my
+    /// global view" footgun.
     pub repo: Option<String>,
     /// `open` (default) | `closed` | `all`.
     #[arg(long, default_value = "open")]
     pub state: String,
-    /// List issues across **all repos** that the current token can see
-    /// (issues you authored, are assigned to, or are watching). When
-    /// set, `repo` is ignored. Calls `GET /user/issues` upstream.
-    /// The default table picks up an extra `REPO` column so you can
-    /// tell which project each row lives in.
-    #[arg(long)]
-    pub mine: bool,
     #[arg(long, default_value_t = 30u32)]
     pub limit: u32,
     #[arg(long, default_value_t = 1u32)]
@@ -261,10 +266,18 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
         Some(args.state.clone())
     };
 
-    let items: Vec<Value> = if args.mine {
-        // `GET /user/issues` — issues assigned to / authored by the current
-        // token. The upstream query schema is a superset of the repo-scoped
-        // one; we only wire the fields our CLI currently exposes.
+    // Scope is decided purely by whether the user passed a repo slug:
+    //   - no slug → cross-repo `/user/issues` (ListUserIssues). This is
+    //     the default because that's what users overwhelmingly mean by
+    //     "show me my issues" — the previous `--mine` flag was an
+    //     opt-in for the same thing and confused everyone who didn't
+    //     know it existed.
+    //   - explicit slug → repo-scoped `/{slug}/-/issues` (ListIssues).
+    // We deliberately do NOT auto-resolve from `git remote` here:
+    // running `cnb issue list` inside any random repo silently
+    // narrowing the view was the exact footgun this redesign fixes.
+    let cross_repo = args.repo.is_none();
+    let items: Vec<Value> = if cross_repo {
         let mut q = ListUserIssuesQuery::new().page(page).page_size(page_size);
         if let Some(s) = state {
             q = q.state(s);
@@ -279,9 +292,7 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
             .cloned()
             .unwrap_or_default()
     } else {
-        // `GET /{repo}/-/issues` — repo-scoped listing. Typed response is
-        // `Vec<Issue>`.
-        let repo = ctx.resolve_repo(args.repo.as_deref())?;
+        let repo = args.repo.clone().expect("guarded by !cross_repo");
         let mut q = ListIssuesQuery::new().page(page).page_size(page_size);
         if let Some(s) = state {
             q = q.state(s);
@@ -318,12 +329,11 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
             })
             .unwrap_or_default();
         let upd = it.get("updated_at").and_then(Value::as_str).unwrap_or("");
-        if args.mine {
-            // `--mine` returns `UserIssue` items, which carry a `repo`
-            // sub-object the repo-scoped `Issue` does not. Surface it as
-            // an extra column so you can tell which project each row
-            // belongs to — without this column the cross-repo view is
-            // basically unreadable.
+        if cross_repo {
+            // `UserIssue` items carry a `repo` sub-object the repo-scoped
+            // `Issue` does not — surface its `path` as the leading column
+            // so you can tell which project each row belongs to. Without
+            // this column the cross-repo view is basically unreadable.
             let repo_path = it
                 .get("repo")
                 .and_then(|r| r.get("path"))
@@ -341,7 +351,7 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
         }
     }
     let mut stdout = std::io::stdout().lock();
-    if args.mine {
+    if cross_repo {
         table::write_table(
             &mut stdout,
             &["REPO", "#", "TITLE", "LABELS", "UPDATED"],
@@ -361,22 +371,15 @@ async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
     // command silently broke". Only on TTY: pipes / scripts must keep
     // seeing exactly the rendered table on stdout.
     if rows.is_empty() && ctx.io.stderr_is_tty {
-        if args.mine {
+        if cross_repo {
             eprintln!(
-                "(no issues match — `cnb issue list --mine --state {}` saw 0 rows across all repos accessible to the current token)",
+                "(no issues match — `cnb issue list --state {}` saw 0 rows across all repos accessible to the current token; try `--state all` or pass an explicit OWNER/REPO for a repo-scoped view)",
                 args.state
             );
         } else {
-            // Show the slug we actually queried so users can confirm the
-            // repo resolution is what they expected.
-            let queried = args
-                .repo
-                .as_deref()
-                .map(str::to_owned)
-                .or_else(|| ctx.resolve_repo(None).ok())
-                .unwrap_or_else(|| "<unresolved>".to_owned());
+            let queried = args.repo.as_deref().unwrap_or("<unresolved>");
             eprintln!(
-                "(no issues in `{queried}` with --state {}; try `--state all`, pass an explicit OWNER/REPO, or use `--mine` for a cross-repo view)",
+                "(no issues in `{queried}` with --state {}; try `--state all`, or drop the slug for the cross-repo `/user/issues` view)",
                 args.state
             );
         }
