@@ -6,6 +6,33 @@
 
 ---
 
+## 0. 文档状态（请先读 — 2026-05-12 更新）
+
+> **本文档是 M0 阶段（2026-04，"设计冻结"）的架构快照。**
+> 它记录了项目启动时的设计意图、决策依据和路线图，是项目的**史料档案**而非实时镜像。后续 milestone 的实施过程中，工程现状已经在多个维度上**演进、超越甚至偏离**了 §3–§16 描述的形态——这是健康的、由真实约束驱动的演化，不是"DESIGN 失效"。
+>
+> 当你需要以下信息时，请直接看更准确的来源：
+>
+> | 你想了解 | 看这里（**当前态**） | 而不是这里（M0 设计意图） |
+> |--------|------------------|---------------------|
+> | 当前 workspace shape / crate 列表 | [`README.md`](README.md) §"Crate map (current)" | DESIGN §3 / §4 |
+> | HTTP 客户端 / 错误模型 / facade 实现 | [`docs/sdk-0.2.2-upgrade.md`](docs/sdk-0.2.2-upgrade.md) §6 | DESIGN §6 / §9.3 |
+> | 仍未完成的 open items | [`docs/known-gaps.md`](docs/known-gaps.md) | DESIGN §15 / §16 |
+> | SDK 上游问题与解决进度 | [`docs/sdk-issues.md`](docs/sdk-issues.md) + [`docs/upstream-issues/`](docs/upstream-issues/) | — |
+> | 用户向使用文档 | [`docs/src/`](docs/src/)（mdbook handbook） | — |
+> | 版本历史 | [`CHANGELOG.md`](CHANGELOG.md) | — |
+>
+> **最重要的偏离**（本节 = "DESIGN reader 必知的 4 件事"）：
+>
+> 1. **`cnb-api` crate 已退役**（commit `9547335`，2026-05-11）。本文档里所有"`cnb-api` · service facade / http core / generated"的描述都是历史。当前所有 HTTP 流量直接走外部 typed SDK `cnb-sdk`（即 crates.io 的 `cnb` 0.2.x，workspace 里 alias 为 `cnb-sdk` 避开与本 bin 同名冲突）。`cnb api` raw passthrough 与 `cnb issue --attach` 的 multipart upload 这两个 SDK 不建模的小流，搬到了 `crates/cnb-cli/src/http/`，复用 SDK 共享的 reqwest client。
+> 2. **workspace 由 8 → 6 crates**：`cnb / cnb-cli / cnb-auth / cnb-config / cnb-git / cnb-tty / xtask`（外加 `xtask` 不算业务 crate）。`cnb-api` 已删，`cnb-graphql`（DESIGN §16 #8 "未来可能"）确认不做。
+> 3. **OpenAPI → Rust 不再走 progenitor**（DESIGN §7 描述的本地生成方案）。改为依赖**上游已发布的 typed SDK**（`cnb-sdk`），`xtask sync-openapi` 这一类本地生成流水线不存在，相关的 `crates/cnb-api/generated/` 树也不存在。
+> 4. **路线图 M0–M5 已交付**，M5.1（自动更新检查 + GitHub release 流水线）也已完成。仍 open 的项全部归类到 [`docs/known-gaps.md`](docs/known-gaps.md) 的 16 项"外部依赖型 open item"，本仓库内无单方面可解的 TODO。
+>
+> 其余 §1（目标 / 非目标 / 优先级）、§2（架构原则 / 总览图）、§5（认证子系统）、§8（命令清单与端点映射）、§10–§13（仓库上下文 / 输出 / 错误码 / 测试策略）、§14（构建分发）、附录 A/B/C 在工程意图层面**仍然有效**，可以放心阅读。
+
+---
+
 ## 目录
 
 1. [项目目标与非目标](#1-项目目标与非目标)
