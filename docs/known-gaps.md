@@ -30,8 +30,9 @@
 | 13| DESIGN §16 #6 · registry 制品类型枚举     | 上游 spec    | spec 未明确 `type` 合法值            | `--type` 当前是自由字符串，无严格校验             | spec 补充枚举后加 clap `value_parser`|
 | 14| DESIGN §16 #7 · cnb 错误码字典            | 上游文档     | 仅探知到 `errcode=5/16`              | `ApiError` 映射不全，部分 5xx 仅有 generic 提示    | 服务端发布完整码表 + 我方维护附录 B  |
 | 15| Windows ACL 严格化                         | 取舍         | 需 `windows-sys` 依赖，scope 外      | 非 Unix 下 `hosts.toml` 仅靠 NTFS 默认 profile ACL 保护 | 若有 Windows-first 部署场景再做     |
+| 16| `cnb pr list` 跨仓库视图（`/user/pulls`）  | 上游 API+SDK | 平台暂无 `/user/pulls` 端点          | `cnb pr list`（无 slug）只能 repo-scoped；与 `cnb issue list` 对称性缺失 | 服务端补端点 + SDK 暴露 typed 方法   |
 
-共 **15 项**，全部无法在本仓库内单方面解决。下文按类别给出详情。
+共 **16 项**，全部无法在本仓库内单方面解决。下文按类别给出详情。
 
 ---
 
@@ -79,7 +80,7 @@ Phase 2 步骤 2.11 完成时累计出 19 个 SDK 痛点，已按 A/B/C 分级�
 
 ---
 
-## 2. 上游 SDK 修复（#5 – #8）
+## 2. 上游 SDK 修复（#5 – #8, #16）
 
 这些不是"我们写文档就能结束"的问题，等上游发版。
 
@@ -127,6 +128,45 @@ Phase 2 步骤 2.11 完成时累计出 19 个 SDK 痛点，已按 A/B/C 分级�
   退出码映射保留）。
 - **历史保留**：本条留作 audit trail；从下一次 known-gaps 维护开始
   可以归档（移到一个"resolved-archive"段落或直接删）。
+
+### #16 `cnb pr list` 跨仓库视图（与 `cnb issue list` 对称）
+
+- **现状**（commit `666ba20`，2026-05-12）：`cnb issue list` 已经把
+  默认行为改成"跨用户所有仓库的相关 issue"，调用上游
+  `GET /user/issues`（`ListUserIssues`），表加 `REPO` 列；显式传
+  slug 时退化为单仓库 `GET /{slug}/-/issues`（`ListIssues`）。
+  **`cnb pr list` 想做完全对称的事，但平台没有 `/user/pulls`
+  端点**——已在 2026-05-12 实测：`/user/pulls`、`/user/pull-requests`、
+  `/user/prs`、`/search/pulls`、`/search/issues` **全部返回 404 not
+  found**。所以 `cnb pr list`（无 slug 时）目前还会走 `resolve_repo`
+  → 当前 git remote → repo-scoped，且空表 hint 里明确告知用户"平台
+  暂不支持跨仓库 PR 视图"。
+- **目标形态**：一旦平台 + SDK 双端支持，按 `cnb issue list` 同款重构：
+  - 默认（无 slug）→ 跨仓库 PR 视图，表加 `REPO` 列
+  - 显式传 slug → repo-scoped（保留现有 `ListPulls` 路径）
+  - 同步删除 `cnb pr list` 的"不再从 git remote 推断"footgun
+    （和 issue 一致）
+- **解除条件**（**任一上游路径**）：
+  1. **首选**：cnb 平台新增 `GET /user/pulls`（或同义端点，shape 与
+     `/user/issues` 对齐：返回带 `repo.path` 的扁平列表）+ cnb-sdk
+     新版本暴露 `client.pulls().list_user_pulls(&q)` typed 方法。
+  2. **次选**：cnb 平台暴露 `GET /search/pulls`（或 `/search/issues`
+     带 `type=pull` 过滤）作为搜索路径，CLI 走 `Context::sdk_raw_get`
+     模式拼装。
+- **影响范围**：用户体验缺口（与 issue 不对称），但**不阻塞 v1.0
+  发布**——repo-scoped PR 列表已可用。
+- **关联代码锚点**：
+  - `crates/cnb-cli/src/commands/pr.rs` — `ListArgs.repo` + `list()`
+    主体 + 空表 hint（hint 里已留 forward-looking 文案）。
+  - `crates/cnb-cli/src/commands/issue.rs` — 对照实现
+    （`ListArgs.repo` 文档段 + `cross_repo` 分支），未来 PR 改造
+    可直接套用同一模板。
+- **建议负责人**：作者 / 跟 cnb 平台团队对接（端点） + 跟上游
+  cnb-sdk 维护者对接（typed 方法）。条件齐备后 CLI 侧改造预计
+  半天工作量（含 wiremock 集成测试）。
+- **跟踪触发器**：每次 cnb-sdk 升级（看 `cnb_sdk::pulls` 是否新增
+  `list_user_pulls` 同名方法）；每次平台 OpenAPI spec 更新时 grep
+  `/user/pulls`。
 
 ---
 

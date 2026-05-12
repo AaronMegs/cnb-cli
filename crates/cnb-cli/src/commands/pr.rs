@@ -272,6 +272,20 @@ fn render(ctx: &Context, opts: &OutputOpts, v: &Value) -> Result<bool, CliError>
 }
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
+    // NOTE (tracked as `docs/known-gaps.md` #16):
+    //   `cnb issue list` was reshaped (commit 666ba20) so that the
+    //   default — no slug — runs `GET /user/issues` (cross-repo) and
+    //   only narrows when an explicit OWNER/REPO is passed. The same
+    //   inversion is the **right** UX for `cnb pr list`, but the cnb
+    //   platform does not currently expose `/user/pulls` (verified
+    //   2026-05-12; /user/pulls, /user/pull-requests, /user/prs,
+    //   /search/pulls all 404). Until the upstream API + cnb-sdk
+    //   ship a typed `client.pulls().list_user_pulls(&q)` (or an
+    //   equivalent search route), this command stays repo-scoped:
+    //   no slug → resolve from git remote → `ListPulls` against
+    //   that single repo. The empty-table hint at the bottom of
+    //   this function tells users about the asymmetry so they do
+    //   not assume the feature is just missing by oversight.
     let repo = ctx.resolve_repo(args.repo.as_deref())?;
     let page = i64::from(args.page);
     let page_size = i64::from(args.limit.max(1));
