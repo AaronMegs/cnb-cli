@@ -5,6 +5,8 @@
 
 Official command-line tool for [CNB (CloudNative Build, cnb.cool)](https://cnb.cool), implemented in Rust and aligned with GitHub `gh` CLI conventions.
 
+> **中文版**: [README.zh-CN.md](./README.zh-CN.md)
+>
 > **Status**: v0.4.0-alpha — 17 top-level commands; M4 done (registry / mission / org / browse / completion / config / alias) + M5.0 update check & release pipeline. See [Milestone status](#milestone-status).
 
 ## Quickstart
