@@ -143,6 +143,7 @@ cnb api /user --template '{username}: {email}'
 ## Documentation
 
 - [DESIGN.md](DESIGN.md) — Architecture, command catalog, roadmap (single source of truth).
+- [docs/wiki/](docs/wiki/) — **Project Wiki** (CodeWiki-style): 6-doc engineering knowledge base (project overview, architecture, modules, command catalog, data flows, developer guide). Best entry point for anyone picking up the codebase.
 - [docs/known-gaps.md](docs/known-gaps.md) — Open items that are **blocked on external dependencies** (upstream SDK fixes, server-team clarifications, hosting infra). Single-page dashboard for anyone picking up the project.
 - [docs/sdk-issues.md](docs/sdk-issues.md) — 19 tracked upstream SDK issues + rollout plan. Consolidated Chinese summary: [`docs/upstream-issues/SDK-反馈汇总.md`](docs/upstream-issues/SDK-反馈汇总.md).
 - [docs/sdk-0.2.2-upgrade.md](docs/sdk-0.2.2-upgrade.md) — cnb-sdk 0.2.2 upgrade verification report: per-issue fix matrix + the cnb-api crate retirement narrative.
