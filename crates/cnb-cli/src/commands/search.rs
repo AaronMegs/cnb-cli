@@ -10,9 +10,9 @@
 //! Phase 2 of the migration (see CHANGELOG under `[Unreleased]`).
 
 use clap::Args;
-use cnb_sdk::search::ListPublicReposQuery;
 use serde_json::Value;
 
+use crate::commands::repo::format_visibility;
 use crate::context::Context;
 use crate::error::CliError;
 use cnb_tty::{jq, json_out, table, template};
@@ -57,35 +57,55 @@ pub struct SearchArgs {
 }
 
 pub async fn run(ctx: &mut Context, args: SearchArgs) -> Result<(), CliError> {
-    // SDK 0.2.2 marked `ListPublicReposQuery` as `#[non_exhaustive]`, so
-    // direct struct init no longer compiles. Use the builder chain — same
-    // semantics, future-proof against new optional fields.
-    let mut query = ListPublicReposQuery::new();
-    if let Some(v) = args.key.clone() {
-        query = query.key(v);
+    // We *intentionally* bypass the typed `client.search().list_public_repos(&q)`
+    // call here. Reason: cnb 0.2.2's `Repos4UserBase` DTO types `flags`
+    // as `Option<crate::models::Repo>`, but the live server returns a
+    // plain string at that field (e.g. `"Unknown"`), which makes serde
+    // blow up with `invalid type: string "Unknown", expected struct Repo`.
+    //
+    // We build the same `GET /search/public-repos` URL by hand (using
+    // the SDK's `client.http().url(path)` so base-URL precedence and
+    // percent-encoding stay identical) and decode the body as raw
+    // `serde_json::Value`. The default table only reads `path`,
+    // `visibility_level`, and `updated_at`, so dropping the typed DTO
+    // costs us nothing.
+    //
+    // Tracked as a follow-up SDK issue (sibling to SDK-I02 / SDK-I11);
+    // revert to the typed call once upstream relaxes the field to
+    // `Option<serde_json::Value>` or the server stops sending the
+    // string form.
+    let mut path = String::from("/search/public-repos");
+    let mut sep = '?';
+    let push = |path: &mut String, sep: &mut char, k: &str, v: &str| {
+        path.push(*sep);
+        path.push_str(k);
+        path.push('=');
+        path.extend(url::form_urlencoded::byte_serialize(v.as_bytes()));
+        *sep = '&';
+    };
+    if let Some(v) = args.key.as_deref() {
+        push(&mut path, &mut sep, "key", v);
     }
-    if let Some(v) = args.flags.clone() {
-        query = query.flags(v);
+    if let Some(v) = args.flags.as_deref() {
+        push(&mut path, &mut sep, "flags", v);
     }
-    if let Some(v) = args.flags_match.clone() {
-        query = query.flags_match(v);
+    if let Some(v) = args.flags_match.as_deref() {
+        push(&mut path, &mut sep, "flags_match", v);
     }
-    if let Some(v) = args.order_by.clone() {
-        query = query.order_by(v);
+    if let Some(v) = args.order_by.as_deref() {
+        push(&mut path, &mut sep, "order_by", v);
     }
     if args.desc {
-        query = query.desc(true);
+        push(&mut path, &mut sep, "desc", "true");
     }
     if let Some(v) = args.top_n {
-        query = query.top_n(v);
+        // SDK 0.2.2 wire form: query parameter is `topN` (camelCase),
+        // not `top_n`. Match it byte-for-byte so any shared wiremock
+        // fixture / server-side log keeps recognising the request.
+        push(&mut path, &mut sep, "topN", &v.to_string());
     }
 
-    let client = ctx.sdk()?;
-    let hits = client.search().list_public_repos(&query).await?;
-
-    // Reinterpret as serde_json::Value for uniform --json/--jq/--template.
-    // `Repos4UserBase` derives Serialize, so the conversion is infallible.
-    let v = serde_json::to_value(&hits).expect("Repos4UserBase serialises infallibly");
+    let v = ctx.sdk_raw_get(&path).await?;
 
     if let Some(tpl) = args.template.as_deref() {
         println!("{}", template::apply(&v, tpl)?);
@@ -106,24 +126,21 @@ pub async fn run(ctx: &mut Context, args: SearchArgs) -> Result<(), CliError> {
     }
 
     // Default human-readable table. Column choice mirrors the fields the
-    // `Repos4UserBase` DTO actually populates (the upstream search response
-    // does NOT include `full_path` / `visibility` — that's the `Repos4User`
-    // shape used by `repo list`. We surface `path`, `visibility_level` and
-    // `updated_at` instead).
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(hits.len());
-    if let Some(arr) = v.as_array() {
-        for it in arr {
-            let path = it.get("path").and_then(Value::as_str).unwrap_or("").to_owned();
-            // `visibility_level` may serialise as either a string enum
-            // (e.g. "public") or, depending on the spec variant, an int —
-            // we coerce both to a display string.
-            let vis = it
-                .get("visibility_level")
-                .map(|val| val.as_str().map_or_else(|| val.to_string(), ToOwned::to_owned))
-                .unwrap_or_default();
-            let updated = it.get("updated_at").and_then(Value::as_str).unwrap_or("").to_owned();
-            rows.push(vec![path, vis, updated]);
-        }
+    // server actually populates for a search hit (the upstream search
+    // response does NOT include `full_path` / `visibility` — that's the
+    // `Repos4User` shape used by `repo list`. We surface `path`,
+    // `visibility_level` and `updated_at` instead).
+    let empty = Vec::<Value>::new();
+    let arr = v.as_array().unwrap_or(&empty);
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(arr.len());
+    for it in arr {
+        let p = it.get("path").and_then(Value::as_str).unwrap_or("").to_owned();
+        // Use the shared `format_visibility` helper so the search table
+        // and the `repo list/view` table render visibility identically
+        // (canonical SDK capitalisation: Public / Private / Secret).
+        let vis = format_visibility(it.get("visibility_level")).to_owned();
+        let updated = it.get("updated_at").and_then(Value::as_str).unwrap_or("").to_owned();
+        rows.push(vec![p, vis, updated]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(

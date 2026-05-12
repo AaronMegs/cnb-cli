@@ -20,9 +20,7 @@ use std::process::Command;
 
 use clap::{Args, Subcommand};
 use cnb_sdk::models::{CreateRepoReq, RepoPatch, TransferSlugReq};
-use cnb_sdk::repositories::{
-    GetGroupSubReposQuery, GetReposByUserNameQuery, GetReposQuery, ListForksReposQuery, SetRepoVisibilityQuery,
-};
+use cnb_sdk::repositories::{ListForksReposQuery, SetRepoVisibilityQuery};
 use cnb_tty::{jq, json_out, table, template};
 use serde_json::Value;
 
@@ -289,7 +287,7 @@ pub async fn run(ctx: &mut Context, args: RepoArgs) -> Result<(), CliError> {
 /// This helper preserves user-facing output identical to the SDK's
 /// canonical capitalisation so `cnb repo view --json | jq` round-trips
 /// the wire form. Unknown / missing values render as `?`.
-fn format_visibility(raw: Option<&Value>) -> &'static str {
+pub(crate) fn format_visibility(raw: Option<&Value>) -> &'static str {
     match raw {
         Some(Value::String(s)) => match s.as_str() {
             "Public" | "public" => "Public",
@@ -311,64 +309,67 @@ fn format_visibility(raw: Option<&Value>) -> &'static str {
 }
 
 async fn list(ctx: &mut Context, args: ListArgs) -> Result<(), CliError> {
-    let client = ctx.sdk()?;
     let page = i64::from(args.page);
     let page_size = i64::from(args.limit.max(1));
-    // Dispatch to the right SDK operation based on what the user supplied:
-    //   - no target          → `GET /user/repos`        (get_repos)
-    //   - target with a `/`  → `GET /{slug}/-/repos`    (get_group_sub_repos)
-    //   - bare username      → `GET /users/{u}/repos`   (get_repos_by_user_name)
-    let items = match args.target.as_deref() {
-        None => {
-            let q = GetReposQuery::new().page(page).page_size(page_size);
-            client.repositories().get_repos(&q).await?
-        }
+    // Dispatch to the right endpoint based on what the user supplied:
+    //   - no target          → `GET /user/repos`        (current user)
+    //   - target with a `/`  → `GET /{slug}/-/repos`    (group subgroup)
+    //   - bare username      → `GET /users/{u}/repos`   (other user)
+    //
+    // We hit each endpoint via `sdk_raw_get` (raw `serde_json::Value`)
+    // rather than the typed `client.repositories().get_repos(...)` calls.
+    // Why: cnb 0.2.2's `Repos4UserBase` DTO types `flags` as
+    // `Option<crate::models::Repo>`, but the live server returns a plain
+    // string here (e.g. `"Unknown"`). Decoding into the typed DTO blows
+    // up with `invalid type: string "Unknown", expected struct Repo`.
+    // Dropping into raw `Value` sidesteps that field entirely — and the
+    // table renderer below only reads `path` / `name` / `description` /
+    // `visibility_level` / `updated_at`, so we lose nothing.
+    //
+    // Tracked as a follow-up SDK issue (sibling to SDK-I02 / SDK-I11).
+    // Once the upstream DTO is fixed (or relaxed to
+    // `Option<serde_json::Value>`), revert this back to the typed call.
+    let path = match args.target.as_deref() {
+        None => format!("/user/repos?page={page}&page_size={page_size}"),
         Some(t) if t.contains('/') => {
-            let q = GetGroupSubReposQuery::new().page(page).page_size(page_size);
-            client.repositories().get_group_sub_repos(t.to_owned(), &q).await?
+            format!("/{}/-/repos?page={page}&page_size={page_size}", t.trim_matches('/'))
         }
-        Some(user) => {
-            let q = GetReposByUserNameQuery::new().page(page).page_size(page_size);
-            client
-                .repositories()
-                .get_repos_by_user_name(user.to_owned(), &q)
-                .await?
-        }
+        Some(user) => format!(
+            "/users/{}/repos?page={page}&page_size={page_size}",
+            user.trim_matches('/')
+        ),
     };
-    // Serialise once so we can drive both the --json/--jq/--template path
-    // and the default table off the same Value. `Repos4User` derives
-    // Serialize, so the round-trip is infallible.
-    let v = serde_json::to_value(&items).expect("Repos4User serialises infallibly");
+    let v = ctx.sdk_raw_get(&path).await?;
     if args.out.render_value(ctx, &v)? {
         return Ok(());
     }
     // Default table.
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(items.len());
-    if let Some(arr) = v.as_array() {
-        for it in arr {
-            let path = it.get("path").and_then(Value::as_str).unwrap_or("");
-            let name = it.get("name").and_then(Value::as_str).unwrap_or(path);
-            let desc = it.get("description").and_then(Value::as_str).unwrap_or("");
-            let vis = format_visibility(it.get("visibility_level"));
-            // Prefer the canonical `updated_at` field that the SDK DTO pins
-            // down; fall back to the older `last_activity_at` key that some
-            // legacy responses use so cached mocks keep working.
-            let upd = it
-                .get("updated_at")
-                .or_else(|| it.get("last_activity_at"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            rows.push(vec![
-                if path.is_empty() {
-                    name.to_owned()
-                } else {
-                    path.to_owned()
-                },
-                desc.to_owned(),
-                vis.to_owned(),
-                upd.to_owned(),
-            ]);
-        }
+    let empty = Vec::<Value>::new();
+    let arr = v.as_array().unwrap_or(&empty);
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(arr.len());
+    for it in arr {
+        let path_field = it.get("path").and_then(Value::as_str).unwrap_or("");
+        let name = it.get("name").and_then(Value::as_str).unwrap_or(path_field);
+        let desc = it.get("description").and_then(Value::as_str).unwrap_or("");
+        let vis = format_visibility(it.get("visibility_level"));
+        // Prefer the canonical `updated_at` field that the SDK DTO pins
+        // down; fall back to the older `last_activity_at` key that some
+        // legacy responses use so cached mocks keep working.
+        let upd = it
+            .get("updated_at")
+            .or_else(|| it.get("last_activity_at"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        rows.push(vec![
+            if path_field.is_empty() {
+                name.to_owned()
+            } else {
+                path_field.to_owned()
+            },
+            desc.to_owned(),
+            vis.to_owned(),
+            upd.to_owned(),
+        ]);
     }
     let mut stdout = std::io::stdout().lock();
     table::write_table(
