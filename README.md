@@ -145,6 +145,7 @@ cnb api /user --template '{username}: {email}'
 - [DESIGN.md](DESIGN.md) — Architecture, command catalog, roadmap (single source of truth).
 - [docs/known-gaps.md](docs/known-gaps.md) — Open items that are **blocked on external dependencies** (upstream SDK fixes, server-team clarifications, hosting infra). Single-page dashboard for anyone picking up the project.
 - [docs/sdk-issues.md](docs/sdk-issues.md) — 19 tracked upstream SDK issues + rollout plan. Consolidated Chinese summary: [`docs/upstream-issues/SDK-反馈汇总.md`](docs/upstream-issues/SDK-反馈汇总.md).
+- [docs/sdk-0.2.2-upgrade.md](docs/sdk-0.2.2-upgrade.md) — cnb-sdk 0.2.2 upgrade verification report: per-issue fix matrix + the cnb-api crate retirement narrative.
 - `cnb --help`, `cnb <command> --help` — Built-in help.
 
 ## Milestone status
@@ -209,6 +210,8 @@ cnb api /user --template '{username}: {email}'
 | 10 | M3 integration suite covers TSV output, two-phase upload, alias resolution, `--watch` plumbing  | ✅     |
 
 **Crate map (M1):** `cnb` (bin) · `cnb-cli` · `cnb-api` · `cnb-config` · `cnb-auth` · `cnb-git` · `cnb-tty` · `xtask`
+
+**Crate map (current, after SDK-2):** `cnb` (bin) · `cnb-cli` · `cnb-config` · `cnb-auth` · `cnb-git` · `cnb-tty` · `xtask` — **`cnb-api` retired**; all HTTP now goes through the external crate `cnb-sdk` (the `cnb` crate on crates.io). See [`docs/sdk-0.2.2-upgrade.md`](docs/sdk-0.2.2-upgrade.md) §6.
 
 (M2 / M3 / M4 add no new crates; `cnb-cli` accumulated `cnb-git` + `indicatif` + `open` + `clap_complete` + `toml` deps.)
 
