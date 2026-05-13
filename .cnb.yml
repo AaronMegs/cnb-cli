@@ -112,7 +112,15 @@ main:
         tags: cnb:arch:amd64
         cpus: 2
       docker:
-        image: rust:1.86
+        # **Intentionally not pinned to rust:1.86**: cargo-deny 0.18.6+
+        # (the first release that parses CVSS v4.0 advisories) requires
+        # rustc ≥ 1.88, which is above our project MSRV. We only need
+        # the newer toolchain to *build the audit tool*; the resulting
+        # binary then audits our actual workspace which is still 1.86.
+        # Using `rust:1` pulls the latest stable so this pipeline keeps
+        # working as the rustsec DB evolves without touching the
+        # project's MSRV.
+        image: rust:1
         volumes:
           - /usr/local/cargo/registry:copy-on-write
       env:
@@ -122,8 +130,17 @@ main:
           # --locked 确保可复现；首次会编译几分钟，之后 cargo registry
           # 缓存命中，二次构建只需几秒。
           script: |
-            cargo install cargo-deny --locked --version "^0.16" || true
-            cargo install cargo-audit --locked --version "^0.21" || true
+            # The RustSec advisory DB started shipping CVSS v4.0 strings
+            # in 2026 and only newer cargo-deny / cargo-audit (via
+            # rustsec ≥ 0.31) parse them. Floor versions below pin the
+            # known-fixed releases (cargo-deny 0.18.6 = PR #805,
+            # cargo-audit 0.22.x). cargo will skip the install if the
+            # cached binary in the cargo-bin volume already meets the
+            # floor, so this stage stays cheap on warm runs.
+            #
+            # Refs: https://github.com/EmbarkStudios/cargo-deny/issues/804
+            cargo install cargo-deny --locked --version ">=0.18.6"
+            cargo install cargo-audit --locked --version ">=0.22"
         - name: cargo deny check
           script: cargo deny check
         - name: cargo audit
