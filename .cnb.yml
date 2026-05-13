@@ -134,13 +134,18 @@ main:
             # in 2026 and only newer cargo-deny / cargo-audit (via
             # rustsec ≥ 0.31) parse them. Floor versions below pin the
             # known-fixed releases (cargo-deny 0.18.6 = PR #805,
-            # cargo-audit 0.22.x). cargo will skip the install if the
-            # cached binary in the cargo-bin volume already meets the
-            # floor, so this stage stays cheap on warm runs.
+            # cargo-audit 0.22.x).
+            #
+            # `RUSTUP_TOOLCHAIN=stable` is **load-bearing**: this repo
+            # ships a `rust-toolchain.toml` that pins to 1.86, but
+            # cargo-deny ≥ 0.18.6 needs rustc ≥ 1.88 *to compile the
+            # tool itself*. We override the toolchain only for these
+            # two `cargo install` calls; the resulting binaries then
+            # audit our 1.86 workspace as usual on the next stages.
             #
             # Refs: https://github.com/EmbarkStudios/cargo-deny/issues/804
-            cargo install cargo-deny --locked --version ">=0.18.6"
-            cargo install cargo-audit --locked --version ">=0.22"
+            RUSTUP_TOOLCHAIN=stable cargo install cargo-deny --locked --version ">=0.18.6"
+            RUSTUP_TOOLCHAIN=stable cargo install cargo-audit --locked --version ">=0.22"
         - name: cargo deny check
           script: cargo deny check
         - name: cargo audit
