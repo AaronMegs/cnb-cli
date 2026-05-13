@@ -257,6 +257,23 @@ main:
 # ─────────────────────────────────────────────────────────────────────
 $:
   tag_push:
+    # ─── pipeline: codewiki 自动生成 Wiki ──────────────────────
+    # 当创建新 tag 时，自动根据仓库内容生成 wiki 文档。
+    # 仓库首页会出现 wiki 入口，可用于快速构建文档中心。
+    # 参考：https://docs.cnb.cool/zh/ai/codewiki.html
+    - name: codewiki
+      services:
+        - docker
+      docker:
+        volumes:
+          - /data/codewiki/${CNB_REPO_SLUG}:data
+      stages:
+        - name: generate codewiki
+          timeout: 10h
+          image: cnbcool/codewiki:latest
+          settings:
+            git_doc_dir: /data/codewiki/${CNB_REPO_SLUG}
+
     - name: release
       runner:
         tags: cnb:arch:amd64
