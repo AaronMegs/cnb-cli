@@ -312,7 +312,12 @@ $:
             EXT: ""
           script: |
             rustup target add ${TARGET}
-            cargo build --release --target ${TARGET} -p cnb
+            # NOTE: `-p cnb` is ambiguous in this workspace because the
+            # external SDK (crates.io `cnb` 0.2.x, aliased as `cnb-sdk`
+            # in Cargo.toml) and our bin crate share the package name
+            # `cnb`. `--manifest-path` selects unambiguously while
+            # still using the workspace target/ dir. See SDK-I04.
+            cargo build --release --target ${TARGET} --manifest-path crates/cnb/Cargo.toml
             bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
 
         - name: build linux aarch64
@@ -320,7 +325,7 @@ $:
             TARGET: aarch64-unknown-linux-gnu
             EXT: ""
           script: |
-            cross build --release --target ${TARGET} -p cnb
+            cross build --release --target ${TARGET} --manifest-path crates/cnb/Cargo.toml
             bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
 
         - name: build macos x86_64 (cross)
@@ -336,7 +341,7 @@ $:
             curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
             export PATH="$PWD/zig-linux-x86_64-0.13.0:$PATH"
             rustup target add ${TARGET}
-            cargo zigbuild --release --target ${TARGET} -p cnb
+            cargo zigbuild --release --target ${TARGET} --manifest-path crates/cnb/Cargo.toml
             bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
 
         - name: build macos aarch64 (cross)
@@ -346,7 +351,7 @@ $:
           script: |
             export PATH="$PWD/zig-linux-x86_64-0.13.0:$PATH"
             rustup target add ${TARGET}
-            cargo zigbuild --release --target ${TARGET} -p cnb
+            cargo zigbuild --release --target ${TARGET} --manifest-path crates/cnb/Cargo.toml
             bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
 
         - name: build windows x86_64 (cross)
@@ -359,7 +364,7 @@ $:
           script: |
             apt-get install -y --no-install-recommends mingw-w64
             rustup target add ${TARGET}
-            cargo build --release --target ${TARGET} -p cnb
+            cargo build --release --target ${TARGET} --manifest-path crates/cnb/Cargo.toml
             bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
 
         # ── 阶段 4: 列出所有产物 + 生成 sha256 一览 ──────────────
