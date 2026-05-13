@@ -31,8 +31,9 @@
 | 14| DESIGN §16 #7 · cnb 错误码字典            | 上游文档     | 仅探知到 `errcode=5/16`              | `ApiError` 映射不全，部分 5xx 仅有 generic 提示    | 服务端发布完整码表 + 我方维护附录 B  |
 | 15| Windows ACL 严格化                         | 取舍         | 需 `windows-sys` 依赖，scope 外      | 非 Unix 下 `hosts.toml` 仅靠 NTFS 默认 profile ACL 保护 | 若有 Windows-first 部署场景再做     |
 | 16| `cnb pr list` 跨仓库视图（`/user/pulls`）  | 上游 API+SDK | 平台暂无 `/user/pulls` 端点          | `cnb pr list`（无 slug）只能 repo-scoped；与 `cnb issue list` 对称性缺失 | 服务端补端点 + SDK 暴露 typed 方法   |
+| 17| 3 个 `unmaintained` advisory（`deny.toml` ignore） | 上游依赖 | `keyring 2.x → zbus 3.15` 锁住 `derivative`/`instant`；`indicatif 0.17` 锁住 `number_prefix` | CI audit 阶段需 ignore 三个 RUSTSEC ID 才能通过 | 升级到 `keyring 3.x`（带 zbus 4）+ `indicatif 0.18` 后即可移除 ignore |
 
-共 **16 项**，全部无法在本仓库内单方面解决。下文按类别给出详情。
+共 **17 项**，全部无法在本仓库内单方面解决。下文按类别给出详情。
 
 ---
 

@@ -5,7 +5,37 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# Concrete advisories we have triaged and accept. Each entry MUST carry
+# a one-line rationale + an upstream pointer so a future maintainer can
+# re-evaluate. We ignore only `unmaintained`-class entries that are
+# **transitive through dependencies we cannot pin around**; any new
+# `vulnerability`-class advisory should be addressed, not added here.
+ignore = [
+    # `derivative` (proc-macro) reaches us via
+    #   keyring 2.3 → secret-service 3.1 → zbus 3.15 → derivative 2.2
+    # Upstream zbus 4.x dropped the `derivative` dep, but `keyring 2.x`
+    # has not migrated to zbus 4. Bumping `keyring` to 3.x is a separate
+    # piece of work tracked in known-gaps; until then there is no safe
+    # upgrade path. Re-evaluate when keyring 3 lands.
+    # Refs: https://rustsec.org/advisories/RUSTSEC-2024-0388
+    "RUSTSEC-2024-0388",
+
+    # `instant` reaches us via
+    #   keyring → secret-service → zbus → fastrand 1.9 → instant 0.1
+    # `fastrand 2.x` no longer pulls `instant`, but `zbus 3.15` is
+    # locked to `fastrand 1.x` via its `async-fs`/`async-io`/`async-process`
+    # 1.x stack. Same upgrade path as RUSTSEC-2024-0388 — clears once
+    # we can move to zbus 4 (i.e. keyring 3).
+    # Refs: https://rustsec.org/advisories/RUSTSEC-2024-0384
+    "RUSTSEC-2024-0384",
+
+    # `number_prefix` reaches us via `indicatif 0.17 → number_prefix 0.4`.
+    # `indicatif 0.18` (released 2025-Q4) drops the dep but bumps MSRV
+    # and reworks several public types; the migration is non-trivial
+    # and unrelated to our threat model. Tracked for a focused PR.
+    # Refs: https://rustsec.org/advisories/RUSTSEC-2025-0119
+    "RUSTSEC-2025-0119",
+]
 # Default to denying every known advisory; CI will surface them as failures
 # rather than warnings. Concrete CVEs that we accept (after triage) go into
 # the `ignore` list above with a justification comment.
@@ -19,7 +49,11 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    # `Unicode-DFS-2016` was removed: the Unicode crates migrated to
+    # `Unicode-3.0` in 2024 and our current dep tree no longer carries
+    # any DFS-2016 crate, so leaving the entry here triggered a
+    # `license-not-encountered` warning. Re-add if a future dep
+    # surfaces it.
     "Unicode-3.0",
     "MPL-2.0",
     "Zlib",
