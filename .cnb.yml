@@ -1,0 +1,399 @@
+# cnb 流水线配置 ─ 对应 .github/workflows/{ci,docs}.yml 的 cnb 版本。
+# release 流程（对应 .github/workflows/release.yml）在本文件末尾的 tag_push 段。
+#
+# 与 GitHub Actions 的关键差异：
+#
+# 1. 文件位置：cnb 用单文件 .cnb.yml（顶层 = 触发分支 → 事件 → pipeline 数组），
+#    GitHub 用 .github/workflows/*.yml（每文件一个 workflow）。
+#
+# 2. runner：cnb 平台 **只有 Linux amd64 / arm64** runner（没有原生 macOS /
+#    Windows runner，详见 docs.cnb.cool/zh/build/build-node.html）。所以：
+#    - lint / test / docs：在 Linux runner 直接跑
+#    - 跨平台 release binary：必须 **交叉编译**（用 `cross`）。GitHub 的
+#      "matrix.os = macos-latest / windows-latest" 在 cnb 上等价为多个
+#      pipeline，每个用不同 cross target。
+#
+# 3. 触发：cnb 用 push / pull_request / tag_push 等事件名（和 GitHub 同义但
+#    嵌套在分支下）。这里把 GitHub 的 paths-ignore 翻译成 cnb 的 ifModify。
+#
+# 4. 缓存：cnb 用 docker.volumes 的 copy-on-write 类型，对应 GitHub 的
+#    Swatinem/rust-cache。挂 ~/.cargo/registry 和 target/ 即可。
+#
+# 5. 文档：cnb 不像 GitHub 一样自动 upload-artifact 给 reviewer 预览。本文件
+#    把 mdbook build 产出 push 到 CNB 制品库（Docker registry）作为版本化产物，
+#    或者简单 ls 一下作为 smoke。本配置选简单 smoke + 打包到当前 pipeline 的
+#    工作区临时目录，详见下方 docs pipeline。
+#
+# 6. cosign 签名：GitHub release.yml 用 sigstore keyless（依赖 GitHub OIDC
+#    token），cnb 上 OIDC 提供方不同，cosign keyless 无法直接复用。这里
+#    改成 sha256 校验和 + 文档说明 + 留 TODO 注释。要严格 cosign 需要外部
+#    注入 cosign key（cnb 的 imports 密钥仓库）。
+
+# ─────────────────────────────────────────────────────────────────────
+# main 分支 push / PR 触发：lint + test + audit + docs（按需）
+# ─────────────────────────────────────────────────────────────────────
+main:
+  push:
+    # ─── pipeline 1: lint (fmt + clippy) ───────────────────────────
+    - name: lint
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 4
+      docker:
+        # 官方 rust 镜像。1.86 与 rust-toolchain.toml 锁定版本一致。
+        image: rust:1.86
+        volumes:
+          # cargo registry 和 target 缓存 ─ 大幅加速二次构建。
+          # copy-on-write 让并发 pipeline 互不干扰。
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+      stages:
+        - name: rustup components
+          script: rustup component add rustfmt clippy
+        - name: cargo fmt --check
+          script: cargo fmt --all --check
+        - name: cargo clippy
+          script: cargo clippy --workspace --all-targets -- -D warnings
+
+    # ─── pipeline 2: test (Linux x86_64 主目标) ────────────────────
+    - name: test-linux-amd64
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 8
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+        RUST_BACKTRACE: "1"
+        # 强制 token 走文件回退（runner 容器里没 system keyring）。
+        # 与 .github/workflows/ci.yml 的 CNB_KEYRING_BACKEND=none 等价。
+        CNB_KEYRING_BACKEND: none
+      stages:
+        - name: cargo build
+          script: cargo build --workspace --all-targets
+        - name: cargo test
+          # --test-threads=1 ：避免 cnb-tty::color 的 env-var race。
+          # 与 GitHub ci.yml 完全一致的约定。
+          script: cargo test --workspace --all-targets -- --test-threads=1
+
+    # ─── pipeline 3: test (Linux aarch64，验证交叉构建链路) ────────
+    # 不是必须，但 release 时会用同样的 target，提前在 ci 里 pin 一下
+    # 编译性是健康的。如果你们想节省 runner 资源，可以删掉这个 pipeline。
+    - name: test-linux-arm64
+      runner:
+        tags: cnb:arch:arm64:v8
+        cpus: 4
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target-arm64:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+        CNB_KEYRING_BACKEND: none
+      stages:
+        - name: cargo build
+          script: cargo build --workspace --all-targets
+        - name: cargo test (smoke)
+          # arm64 上只跑 lib 单测节省时间；集成测试在 amd64 跑过即可。
+          script: cargo test --workspace --lib -- --test-threads=1
+
+    # ─── pipeline 4: audit (cargo-deny + cargo-audit) ──────────────
+    - name: audit
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 2
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+      stages:
+        - name: install cargo-deny + cargo-audit
+          # --locked 确保可复现；首次会编译几分钟，之后 cargo registry
+          # 缓存命中，二次构建只需几秒。
+          script: |
+            cargo install cargo-deny --locked --version "^0.16" || true
+            cargo install cargo-audit --locked --version "^0.21" || true
+        - name: cargo deny check
+          script: cargo deny check
+        - name: cargo audit
+          # advisories DB 一夜可能翻新；与 GitHub ci.yml 一致设为
+          # informational（失败不阻塞流水线）。
+          allowFailure: true
+          script: cargo audit
+
+    # ─── pipeline 5: docs (mdbook build) ───────────────────────────
+    # 仅在 docs/ 或本配置变更时跑，对应 GitHub docs.yml 的 paths 过滤。
+    - name: docs
+      ifModify:
+        - "docs/**"
+        - ".cnb.yml"
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 2
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+      stages:
+        - name: install mdbook
+          # 与 GitHub docs.yml 的 mdbook-version 0.4.40 对齐。
+          script: cargo install mdbook --locked --version "0.4.40"
+        - name: mdbook build
+          script: |
+            cd docs
+            mdbook build
+        - name: list output (smoke)
+          # cnb 的 artifact 上传需要走插件（如 cnbcool/attachments），单纯
+          # 把 HTML 上传到当前 build 详情页目前最务实的方式就是 ls 出来
+          # 让人 review 时知道 build 成功了。如果你们想把它发布到 cnb pages
+          # 或者一个独立 docker image，可以再叠一个 stage（参考 .cnb.yml
+          # 文档站部署模式）。
+          script: |
+            ls -la ../target/book/ | head -20
+            echo "HTML files: $(find ../target/book -name '*.html' | wc -l)"
+
+  # ─── PR 事件：lint + test，其它 pipeline 不必跑 ─────────────────
+  pull_request:
+    - name: lint
+      lock:
+        # 同 PR 多次 push 时，自动取消上一次未完成的 lint，节省 runner。
+        key: pr-lint
+        cancel-in-progress: true
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 4
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+      stages:
+        - name: rustup components
+          script: rustup component add rustfmt clippy
+        - name: cargo fmt --check
+          script: cargo fmt --all --check
+        - name: cargo clippy
+          script: cargo clippy --workspace --all-targets -- -D warnings
+
+    - name: test
+      lock:
+        key: pr-test
+        cancel-in-progress: true
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 8
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+        RUST_BACKTRACE: "1"
+        CNB_KEYRING_BACKEND: none
+      stages:
+        - name: cargo build
+          script: cargo build --workspace --all-targets
+        - name: cargo test
+          script: cargo test --workspace --all-targets -- --test-threads=1
+
+    - name: docs
+      ifModify:
+        - "docs/**"
+        - ".cnb.yml"
+      lock:
+        key: pr-docs
+        cancel-in-progress: true
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 2
+      docker:
+        image: rust:1.86
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+      stages:
+        - name: install mdbook
+          script: cargo install mdbook --locked --version "0.4.40"
+        - name: mdbook build
+          script: |
+            cd docs
+            mdbook build
+
+# ─────────────────────────────────────────────────────────────────────
+# tag_push 触发：发布流程（对应 .github/workflows/release.yml）
+#
+# Tag 形如 v0.4.0 / v1.0.0-rc.1 → 触发：
+#   stage 1 (assets)：渲染 man + completions（一次，平台无关）
+#   stage 2 (build)：5 个目标的 binary 交叉编译（顺序，因为 cnb runner
+#                    只有 Linux，所有 darwin/windows binary 都用 cross 在
+#                    Linux 容器里产出）
+#   stage 3 (publish)：打包 tar.gz/zip + sha256 + git:release 创建 Release
+#                       + cnbcool/attachments 上传产物到 Release
+#
+# 与 GitHub release.yml 的差异：
+#   - GitHub 用 actions/upload-artifact 跨 job 共享 dist-shared，cnb 把这
+#     5 个目标合并到同一个 pipeline 的串行 stages，共享同一个工作区，免去
+#     上传/下载 artifact 的开销。
+#   - cosign keyless：cnb 上没有 GitHub OIDC，无法直接 keyless 签名。这里
+#     保留 sha256 sidecar 作为最低保障；如果你们想要严格 sigstore 签名，
+#     需要把 cosign private key 放到 cnb 密钥仓库，用 imports 注入，然后
+#     `cosign sign-blob --key cosign.key`（非 keyless）。下面留了 TODO
+#     注释指明位置。
+# ─────────────────────────────────────────────────────────────────────
+$:
+  tag_push:
+    - name: release
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 8
+      docker:
+        # cross + cargo + 各种交叉工具链，放在一个镜像里方便。
+        # rust:1.86-bookworm 自带最新 apt，便于装 mingw / osxcross。
+        image: rust:1.86-bookworm
+        volumes:
+          - /usr/local/cargo/registry:copy-on-write
+          - ./target:copy-on-write
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_INCREMENTAL: "0"
+        BIN: cnb
+        # CNB_BRANCH 在 tag_push 事件中等于 tag 名（如 v0.4.0），
+        # 详见 docs.cnb.cool/zh/build/build-in-env.html#cnb_branch
+        VERSION_TAG: ${CNB_BRANCH}
+      stages:
+        # ── 阶段 1: 公共 assets（man + shell completions）───────
+        - name: render man + completions
+          script: cargo run -p xtask --release -- gen-dist
+
+        # ── 阶段 2: 安装 cross（跨平台 release 编译工具） ───────
+        - name: install cross
+          # cross 用 docker-in-docker 跑，cnb runner 默认不开。
+          # 这里直接装预编译版以避免依赖 dind service。
+          script: |
+            cargo install cross --git https://github.com/cross-rs/cross --locked
+
+        # ── 阶段 3: 5 个目标交叉编译 ─────────────────────────────
+        # 每个 target 跑完立刻打包，避免 target/ 目录互相覆盖。
+        - name: build linux x86_64
+          env:
+            TARGET: x86_64-unknown-linux-gnu
+            EXT: ""
+          script: |
+            rustup target add ${TARGET}
+            cargo build --release --target ${TARGET} -p cnb
+            bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
+
+        - name: build linux aarch64
+          env:
+            TARGET: aarch64-unknown-linux-gnu
+            EXT: ""
+          script: |
+            cross build --release --target ${TARGET} -p cnb
+            bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
+
+        - name: build macos x86_64 (cross)
+          env:
+            TARGET: x86_64-apple-darwin
+            EXT: ""
+          # cross 默认不带 macOS toolchain，需要 osxcross；社区的
+          # cargo-zigbuild 通常更省事。这里用 zigbuild 路径。
+          script: |
+            apt-get update && apt-get install -y --no-install-recommends curl xz-utils
+            cargo install cargo-zigbuild --locked
+            # zig 可执行文件
+            curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
+            export PATH="$PWD/zig-linux-x86_64-0.13.0:$PATH"
+            rustup target add ${TARGET}
+            cargo zigbuild --release --target ${TARGET} -p cnb
+            bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
+
+        - name: build macos aarch64 (cross)
+          env:
+            TARGET: aarch64-apple-darwin
+            EXT: ""
+          script: |
+            export PATH="$PWD/zig-linux-x86_64-0.13.0:$PATH"
+            rustup target add ${TARGET}
+            cargo zigbuild --release --target ${TARGET} -p cnb
+            bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
+
+        - name: build windows x86_64 (cross)
+          env:
+            TARGET: x86_64-pc-windows-gnu
+            EXT: ".exe"
+          # 用 mingw（gnu 后缀）而不是 msvc，因为 msvc 必须在 Windows runner
+          # 上构建。gnu binary 在 Windows 上跑得一样好，scoop manifest 里
+          # 也可直接用。
+          script: |
+            apt-get install -y --no-install-recommends mingw-w64
+            rustup target add ${TARGET}
+            cargo build --release --target ${TARGET} -p cnb
+            bash scripts/cnb-pack.sh ${TARGET} "${EXT}"
+
+        # ── 阶段 4: 列出所有产物 + 生成 sha256 一览 ──────────────
+        - name: collect release assets
+          script: |
+            cd dist
+            ls -la
+            # 单独写一个 SHA256SUMS 一键校验文件。
+            shasum -a 256 *.tar.gz *.zip > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+
+        # ── 阶段 5: cosign 签名（可选） ──────────────────────────
+        # TODO（known-gaps）：cnb 上没有 GitHub OIDC，sigstore keyless 不可直
+        # 接复用。两条路径：
+        #   A. 严格 cosign：把 cosign.key 放 cnb 密钥仓库，imports 注入：
+        #        - imports: https://cnb.cool/<your-org>/secrets/-/blob/main/cosign.yml
+        #        然后 `cosign sign-blob --key env://COSIGN_KEY --yes ...`
+        #   B. 仅 SHA256：当前已生成，对外文档说明如何 `shasum -c` 校验。
+        # 我们先走 B，留 A 作为 follow-up。
+
+        # ── 阶段 6: 创建 / 更新 Release ─────────────────────────
+        - name: create release
+          type: git:release
+          options:
+            # tag_push 事件下 tag 字段不必传，自动取触发的 tag。
+            title: ${VERSION_TAG}
+            descriptionFromFile: CHANGELOG.md
+            preRelease: false
+            latest: true
+
+        # ── 阶段 7: 上传所有 binary archive 到 Release ───────────
+        # git:release 内置任务不支持上传附件，文档明确要求用
+        # cnbcool/attachments 插件（详见 docs.cnb.cool/zh/build/internal-steps.html#git-release）。
+        - name: upload assets to release
+          image: cnbcool/attachments
+          settings:
+            # 该插件支持 glob，把 dist/ 下的所有 archive + sha256 + SHA256SUMS
+            # 一并上传到当前 tag 对应的 Release。
+            target: dist
+            attachments:
+              - "dist/cnb-*-*.tar.gz"
+              - "dist/cnb-*-*.zip"
+              - "dist/cnb-*-*.sha256"
+              - "dist/SHA256SUMS.txt"
+            # 关联 tag = 当前 push 的 tag 名（CNB_BRANCH）。
+            tag: ${CNB_BRANCH}
+
+      # ── 失败时的清理 / 通知（可按需扩展）────────────────────
+      failStages:
+        - name: report failure
+          script: |
+            echo "Release pipeline failed at stage: ${CNB_BUILD_FAILED_STAGE_NAME}"
+            echo "Build URL: ${CNB_BUILD_WEB_URL}"
+            # 这里可叠加 wecom-message 之类的通知插件。

@@ -142,6 +142,7 @@ cnb api /user --template '{username}: {email}'
 
 - [DESIGN.md](DESIGN.md) —— 架构、命令清单、路线图（设计意图的单一来源）。
 - [docs/wiki/](docs/wiki/) —— **项目 Wiki**（CodeWiki 风格）：6 篇工程知识库（项目概述 / 系统架构 / 核心模块 / 命令清单 / 数据流 / 二次开发指南）。**接手项目首推入口**。
+- [docs/cnb-pipeline.md](docs/cnb-pipeline.md) —— `.cnb.yml` 设计说明：cnb 平台流水线如何映射 / 偏离 `.github/workflows/` 中的 GitHub Actions 工作流。
 - [docs/known-gaps.md](docs/known-gaps.md) —— **被外部依赖阻塞**的 open item（上游 SDK 修复、服务端澄清、托管基础设施）。给后续接手人 / 项目交接看的单页仪表盘。
 - [docs/sdk-issues.md](docs/sdk-issues.md) —— 19 个上游 SDK 痛点 + rollout plan。中文整合稿见 [`docs/upstream-issues/SDK-反馈汇总.md`](docs/upstream-issues/SDK-反馈汇总.md)。
 - [docs/sdk-0.2.2-upgrade.md](docs/sdk-0.2.2-upgrade.md) —— cnb-sdk 0.2.2 升级核对报告，含上游修复落地矩阵 + cnb-api crate 完全退役的过程。
