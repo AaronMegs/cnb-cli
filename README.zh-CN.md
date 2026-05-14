@@ -90,7 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/cnb-cool/cnb/main/scripts/install.s
 ### 从源码构建
 
 ```bash
-git clone https://cnb.cool/cnb/cli
+git clone https://cnb.cool/aodoo/tools/cnb-cli
 cd cli
 cargo build --release
 ./target/release/cnb --help

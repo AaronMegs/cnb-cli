@@ -830,5 +830,5 @@ First feature-complete preview covering all 14 command groups (M1 → M4).
 - Output: TTY detection, comfy-table, JSON/jq/template, NO_COLOR.
 - 3-OS × stable/MSRV CI matrix.
 
-[Unreleased]: https://cnb.cool/cnb/cli/-/compare/v0.4.0-alpha.1...HEAD
-[0.4.0-alpha.1]: https://cnb.cool/cnb/cli/-/releases/v0.4.0-alpha.1
+[Unreleased]: https://cnb.cool/aodoo/tools/cnb-cli/-/compare/v0.4.0-alpha.1...HEAD
+[0.4.0-alpha.1]: https://cnb.cool/aodoo/tools/cnb-cli/-/releases/v0.4.0-alpha.1

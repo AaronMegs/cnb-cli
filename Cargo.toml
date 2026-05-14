@@ -17,7 +17,7 @@ rust-version = "1.86"
 license = "MIT OR Apache-2.0"
 authors = ["CNB CLI Authors <cnb@tencent.com>"]
 homepage = "https://cnb.cool"
-repository = "https://cnb.cool/cnb/cli"
+repository = "https://cnb.cool/aodoo/tools/cnb-cli"
 description = "Official command-line tool for CNB (CloudNative Build, cnb.cool)"
 
 [workspace.dependencies]

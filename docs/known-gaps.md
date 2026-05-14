@@ -15,7 +15,7 @@
 
 | # | 条目                                       | 类别         | 阻塞原因                              | 影响范围                                            | 解除条件                             |
 |--:|--------------------------------------------|--------------|---------------------------------------|-----------------------------------------------------|--------------------------------------|
-| 1 | cnb-cli 公开镜像 URL                       | 外部决策     | 尚未选定公开 mirror                   | 7 份 upstream issue 草稿里的 `https://…` 占位符   | 作者选定 mirror（GitHub 等）         |
+| 1 | ~~cnb-cli 公开镜像 URL~~ ✅                | 已解决       | canonical = `https://cnb.cool/aodoo/tools/cnb-cli` | —                                                  | —                                    |
 | 2 | 5 份 Tier A upstream issue 实际发布        | 外部动作     | 依赖 #1 和上游 issue tracker         | 上游 SDK 不会知道 5 个阻塞级问题                   | #1 完成 + 逐一粘贴到上游 tracker     |
 | 3 | Tier B / Tier C 合并 issue 发布            | 外部动作     | 依赖 #1                               | 上游 SDK 不会知道 14 个 polish/DTO 项             | #1 完成 + 两份合并稿贴到上游         |
 | 4 | 上游 patch PR（SDK-I04/05/06/18）          | 外部动作     | 依赖 #1 + 上游仓库 contribution flow | 4 个最低争议改动无法落地                           | #1 完成 + 发 PR 到上游               |
@@ -39,18 +39,13 @@
 
 ## 1. Upstream SDK 反馈链路（#1 – #4）
 
-Phase 2 步骤 2.11 完成时累计出 19 个 SDK 痛点，已按 A/B/C 分级并产出完整草稿。**剩下唯一的缺口**是"草稿里那些 `https://…` 占位符缺一个真实的 cnb-cli 公开 mirror URL"。
+Phase 2 步骤 2.11 完成时累计出 19 个 SDK 痛点，已按 A/B/C 分级并产出完整草稿。镜像 URL 已经选定（`https://cnb.cool/aodoo/tools/cnb-cli`），#1 由此关闭；剩下 #2–#4 是把草稿粘到上游 issue tracker 的 social work。
 
-### #1 cnb-cli 公开 mirror URL 待选定
+### #1 ~~cnb-cli 公开 mirror URL 待选定~~ — ✅ Resolved
 
-- **现状**：仓库 `Cargo.toml` 的 `repository = "https://cnb.cool/cnb/cli"` 当前是规划中的地址；`docs/upstream-issues/*.md` 里的所有跨文档链接也都用 `https://…` 占位符。
-- **为什么阻塞**：上游 SDK 维护者需要一个**公开可读**的链接指向 cnb-cli 的具体 commit / 文件行号，否则我们那些"锚定 `b785d35`"的复现锚点没法验证。
-- **需要决策的事**：
-  1. 是否把 cnb-cli 镜像到 GitHub / source.gc / 其它公开平台？
-  2. 若是，用哪个作为 canonical？
-  3. 若 cnb.cool 本身短期内会开放 public read（与 SDK-I06 是同一件事），是否等那个？
-- **解除条件**：作者在两个选项里选一个；随后在本仓库跑一次 `sed -i 's|https://…|<真 URL>|g' docs/upstream-issues/*.md`。
-- **建议负责人**：项目作者（决策 mirror）→ 之后任何人都能执行 sed。
+- **如何解决**：canonical 仓库地址定为 [`https://cnb.cool/aodoo/tools/cnb-cli`](https://cnb.cool/aodoo/tools/cnb-cli)（cnb.cool 上即开放可读，与 GitHub 镜像 [`AaronMegs/cnb-cli`](https://github.com/AaronMegs/cnb-cli) 双向同步）。`Cargo.toml` 的 `repository` 字段、`book.toml` 的 `git-repository-url` / `edit-url-template`、README / CHANGELOG / DESIGN / docs/* 内的 clone & link 全量改完，对应 commit 见 git 历史。
+- **后续**：`docs/upstream-issues/*.md` 里那些"`https://…` 锚点"占位符可以按需替换为真实 commit URL（不再是阻塞 #2–#4 的硬条件 —— 上游可以从 cnb.cool / GitHub 任一镜像访问）。
+- **历史保留**：本条留作 audit trail；下一次 known-gaps 维护可归档。
 
 ### #2 Tier A 5 份 issue 发布
 

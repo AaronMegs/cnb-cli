@@ -28,4 +28,4 @@ cnb api /user
 ## 文档版本
 
 本手册对应 cnb CLI **v0.4.x** 系列。源代码与设计文档：
-<https://cnb.cool/cnb/cli>。
+<https://cnb.cool/aodoo/tools/cnb-cli>。

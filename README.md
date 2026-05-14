@@ -92,7 +92,7 @@ Honors `CNB_VERSION` / `CNB_PREFIX` / `CNB_REPO` env vars too.
 ### Build from source
 
 ```bash
-git clone https://cnb.cool/cnb/cli
+git clone https://cnb.cool/aodoo/tools/cnb-cli
 cd cli
 cargo build --release
 ./target/release/cnb --help

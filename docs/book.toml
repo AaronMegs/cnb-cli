@@ -13,8 +13,8 @@ create-missing = false
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://cnb.cool/cnb/cli"
-edit-url-template = "https://cnb.cool/cnb/cli/-/edit/main/docs/{path}"
+git-repository-url = "https://cnb.cool/aodoo/tools/cnb-cli"
+edit-url-template = "https://cnb.cool/aodoo/tools/cnb-cli/-/edit/main/docs/{path}"
 mathjax-support = false
 no-section-label = false
 fold = { enable = true, level = 1 }

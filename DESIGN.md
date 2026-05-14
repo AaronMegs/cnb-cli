@@ -1106,7 +1106,7 @@ error: <one-line summary>
 | 渠道            | 方式                                                              | 优先级 |
 | --------------- | ----------------------------------------------------------------- | ------ |
 | GitHub Release（镜像） | cargo dist 自动上传                                        | M5     |
-| CNB 自家 release | `https://cnb.cool/cnb/cli/-/releases`，与 GitHub 同步             | M5     |
+| CNB 自家 release | `https://cnb.cool/aodoo/tools/cnb-cli/-/releases`，与 GitHub 同步             | M5     |
 | Homebrew tap    | `cnb-cool/homebrew-tap`，提供 `brew install cnb-cool/tap/cnb`     | M5     |
 | Scoop bucket    | `cnb-cool/scoop-bucket`                                           | M5     |
 | Linux 包        | apt repo（deb）、yum repo（rpm），`cargo dist` 生成               | M6     |
@@ -1121,7 +1121,7 @@ error: <one-line summary>
 
   ```
   ✦ A new release of cnb is available: v0.4.0 → v0.5.0
-    https://cnb.cool/cnb/cli/-/releases/v0.5.0
+    https://cnb.cool/aodoo/tools/cnb-cli/-/releases/v0.5.0
     To upgrade, run: brew upgrade cnb  (或 install.sh)
   ```
 
@@ -1129,7 +1129,7 @@ error: <one-line summary>
 
 - 基于 [mdbook](https://rust-lang.github.io/mdBook/)，源码在 `docs/`
 - 自动从命令树生成 reference（类似 `gh manual`）：`xtask gen-docs`
-- 部署到 `https://cnb.cool/cnb/cli/-/pages/`（CNB 自家 pages）
+- 部署到 `https://cnb.cool/aodoo/tools/cnb-cli/-/pages/`（CNB 自家 pages）
 
 ### 14.6 CHANGELOG
 

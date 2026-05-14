@@ -36,7 +36,7 @@ scoop install cnb
 需要 Rust 1.86+：
 
 ```bash
-git clone https://cnb.cool/cnb/cli
+git clone https://cnb.cool/aodoo/tools/cnb-cli
 cd cli
 cargo install --path crates/cnb --locked
 ```

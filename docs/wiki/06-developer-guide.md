@@ -8,7 +8,7 @@
 ## 6.1 30 秒环境就绪
 
 ```bash
-git clone https://cnb.cool/cnb/cli   # 或你的镜像
+git clone https://cnb.cool/aodoo/tools/cnb-cli   # 或你的镜像
 cd cli
 rustup show                           # 确认 1.86+（rust-toolchain.toml 锁定）
 cargo build --workspace               # 第一次编译约 2 分钟

@@ -141,7 +141,7 @@ flowchart LR
 ### 5.1 一键就绪
 
 ```bash
-git clone https://cnb.cool/cnb/cli   # 或你的镜像
+git clone https://cnb.cool/aodoo/tools/cnb-cli   # 或你的镜像
 cd cli
 rustup show                           # 应显示 1.86+（rust-toolchain.toml 锁定）
 cargo build --workspace               # 首编约 2 分钟
