@@ -1,6 +1,6 @@
 # cnb — CNB CLI
 
-[![ci](https://cnb.cool/cnb/cli/-/badge/ci)](https://cnb.cool/cnb/cli)
+[![ci](https://cnb.cool/aodoo/tools/cnb-cli/-/badge/git/latest/ci/git-clone-yyds)](https://cnb.cool/aodoo/tools/cnb-cli)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可)
 
 [CNB（CloudNative Build，cnb.cool）](https://cnb.cool)的官方命令行工具，使用 Rust 实现，命令风格与 GitHub `gh` CLI 对齐。

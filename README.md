@@ -1,6 +1,6 @@
 # cnb — CNB CLI
 
-[![ci](https://cnb.cool/cnb/cli/-/badge/ci)](https://cnb.cool/cnb/cli)
+[![ci](https://cnb.cool/aodoo/tools/cnb-cli/-/badge/git/latest/ci/git-clone-yyds)](https://cnb.cool/aodoo/tools/cnb-cli)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Official command-line tool for [CNB (CloudNative Build, cnb.cool)](https://cnb.cool), implemented in Rust and aligned with GitHub `gh` CLI conventions.
