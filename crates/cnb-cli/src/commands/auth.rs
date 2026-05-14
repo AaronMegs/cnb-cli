@@ -28,6 +28,13 @@ pub enum AuthCmd {
     Token(TokenArgs),
     /// Configure git to use the cnb token as a credential helper (M4).
     SetupGit(SetupGitArgs),
+    /// Internal: act as a git credential helper (called by git, not humans).
+    ///
+    /// Implements the git-credential protocol over stdin/stdout. Wired up
+    /// by `cnb auth setup-git`; you should not need to invoke this
+    /// directly. Hidden from `--help` to avoid confusing users.
+    #[command(name = "git-credential", hide = true)]
+    GitCredential(GitCredentialArgs),
 }
 
 #[derive(Debug, Args)]
@@ -69,6 +76,17 @@ pub struct SetupGitArgs {
     pub hostname: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct GitCredentialArgs {
+    /// First positional arg passed by git (`get` / `store` / `erase`).
+    /// Only `get` produces output; other operations exit silently.
+    pub operation: String,
+    /// Username whose token to surface. Wired in by `setup-git` so the
+    /// helper is bound to a specific cnb account on this machine.
+    #[arg(long)]
+    pub user: String,
+}
+
 pub async fn run(ctx: &mut Context, args: AuthArgs) -> Result<(), CliError> {
     match args.command {
         AuthCmd::Login(a) => login(ctx, a).await,
@@ -76,6 +94,7 @@ pub async fn run(ctx: &mut Context, args: AuthArgs) -> Result<(), CliError> {
         AuthCmd::Status(a) => status(ctx, a).await,
         AuthCmd::Token(a) => token(ctx, a),
         AuthCmd::SetupGit(a) => setup_git(ctx, a),
+        AuthCmd::GitCredential(a) => git_credential(ctx, a),
     }
 }
 
@@ -215,10 +234,18 @@ fn setup_git(ctx: &mut Context, args: SetupGitArgs) -> Result<(), CliError> {
         ))
     })?;
 
-    let helper_value = format!(
-        "!f() {{ test \"$1\" = get && echo password=$(cnb auth token --user {0}) && echo username={0}; }}; f",
-        st.user
-    );
+    // Helper value uses git's `!`-prefixed exec-command form. The body
+    // is a **plain command line, not a shell script** — git splits on
+    // whitespace and execs directly, which means it works identically
+    // on Linux/macOS *and* on Windows native cmd/PowerShell (no MSYS
+    // bash dependency). The previous `!f() { ... }; f` shell-function
+    // form required Git for Windows' bundled bash and silently broke
+    // anywhere git was installed without one.
+    //
+    // The actual credential-protocol I/O is handled by the hidden
+    // `cnb auth git-credential` subcommand, which reads git's stdin
+    // KV stream and writes back `username=` / `password=` lines.
+    let helper_value = format!("!cnb auth git-credential --user {}", st.user);
     let key = format!("credential.https://{host}.helper");
 
     if args.print_only {
@@ -241,5 +268,71 @@ fn setup_git(ctx: &mut Context, args: SetupGitArgs) -> Result<(), CliError> {
     eprintln!("✓ Configured git credential helper for {host} (user: {})", st.user);
     eprintln!("  git push/pull over https://{host}/... will now use your cnb token.");
     eprintln!("  To remove:  git config --global --unset {key}");
+    Ok(())
+}
+
+/// Hidden subcommand wired into git as a credential helper by `setup-git`.
+///
+/// Implements the [git credential helper protocol]:
+/// - git invokes us with one positional arg (`get` / `store` / `erase`)
+/// - git writes a list of `key=value\n` lines on our stdin, terminated
+///   by a blank line
+/// - on `get`, we MUST write `username=...\n` + `password=...\n` + a
+///   blank line back on stdout (other keys are optional and we omit
+///   them; git already filled them in from the URL)
+/// - `store` and `erase` are no-ops for us: we never persist anything
+///   git asked us to save (the cnb token is the source of truth and is
+///   managed via `cnb auth login` / `logout`), and we cannot meaningfully
+///   "erase" a token whose lifecycle git does not own.
+///
+/// Why a real subcommand and not a shell function: the previous
+/// `!f() { ... }; f` form embedded in git config required POSIX shell
+/// (or Git for Windows' MSYS bash) to evaluate. Native Windows cmd /
+/// PowerShell users — and any other minimal-git environment — silently
+/// got "helper invoked but produced no output". A direct executable
+/// works on every platform git itself runs on.
+///
+/// [git credential helper protocol]: https://git-scm.com/docs/gitcredentials#_custom_helpers
+fn git_credential(ctx: &mut Context, args: GitCredentialArgs) -> Result<(), CliError> {
+    use std::io::BufRead;
+
+    // git only expects output for `get`. We deliberately tolerate any
+    // other op name (`store`, `erase`, future additions) by exiting 0
+    // without printing — git treats no-output as "helper had nothing
+    // to contribute" rather than an error, which is exactly what we
+    // want for a read-only adapter on top of the cnb keyring.
+    if args.operation != "get" {
+        return Ok(());
+    }
+
+    // Drain git's stdin per the protocol — even if we don't need the
+    // values, leaving the pipe full causes git to wait. We stop at the
+    // first empty line, matching git's framing.
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = handle.read_line(&mut line)?;
+        if n == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+
+    // Look up the active token for the bound user. We mirror the
+    // resolution chain that `cnb auth token --user X` uses (env >
+    // keyring > hosts.toml). Any failure here means git can't auth —
+    // we surface it via stderr (visible with GIT_TRACE) and exit
+    // non-zero so the user sees the prompt fall back to interactive
+    // entry rather than silently shipping an empty password.
+    let svc = ctx.auth_service();
+    let token = svc.token(&ctx.host, Some(&args.user))?;
+
+    // Order matches what `git credential fill` expects on stdout: any
+    // missing key triggers a fallback prompt. We write both, then a
+    // blank line to terminate the response.
+    println!("username={}", args.user);
+    println!("password={token}");
+    println!();
     Ok(())
 }
